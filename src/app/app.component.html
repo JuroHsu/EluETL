@@ -1,0 +1,33 @@
+<div class="flex h-screen bg-slate-100">
+  <aside class="flex w-56 flex-col bg-slate-900 text-slate-100">
+    <div class="px-4 py-5 text-lg font-semibold tracking-wide">Elu ETL</div>
+    <nav class="flex-1 space-y-1 px-2">
+      <a
+        routerLink="/connections"
+        routerLinkActive="bg-slate-700 text-white"
+        class="block rounded px-3 py-2 text-sm hover:bg-slate-800"
+      >
+        資料庫連線
+      </a>
+      <a
+        routerLink="/mapping"
+        routerLinkActive="bg-slate-700 text-white"
+        class="block rounded px-3 py-2 text-sm hover:bg-slate-800"
+      >
+        欄位對應
+      </a>
+      <a
+        routerLink="/execute"
+        routerLinkActive="bg-slate-700 text-white"
+        class="block rounded px-3 py-2 text-sm hover:bg-slate-800"
+      >
+        ETL 執行
+      </a>
+    </nav>
+    <div class="px-4 py-3 text-xs text-slate-500">v0.1.0</div>
+  </aside>
+
+  <main class="flex-1 overflow-auto p-6">
+    <router-outlet />
+  </main>
+</div>

@@ -1,0 +1,121 @@
+<div class="mx-auto max-w-2xl">
+  <h1 class="mb-6 text-2xl font-semibold text-slate-800">資料庫連線</h1>
+
+  <form
+    [formGroup]="form"
+    (ngSubmit)="testConnection()"
+    class="space-y-4 rounded-lg bg-white p-6 shadow"
+  >
+    <div class="grid grid-cols-2 gap-4">
+      <label class="block">
+        <span class="mb-1 block text-sm font-medium text-slate-700">連線名稱 *</span>
+        <input
+          formControlName="name"
+          placeholder="例如：正式環境 ERP"
+          class="w-full rounded border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+        />
+      </label>
+
+      <label class="block">
+        <span class="mb-1 block text-sm font-medium text-slate-700">資料庫類型</span>
+        <select
+          formControlName="kind"
+          class="w-full rounded border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+        >
+          <option value="sqlserver">SQL Server</option>
+          <option value="postgres">PostgreSQL</option>
+          <option value="mysql">MySQL</option>
+          <option value="sqlite">SQLite</option>
+        </select>
+      </label>
+    </div>
+
+    @if (!isSqlite) {
+      <div class="grid grid-cols-3 gap-4">
+        <label class="col-span-2 block">
+          <span class="mb-1 block text-sm font-medium text-slate-700">主機</span>
+          <input
+            formControlName="host"
+            class="w-full rounded border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+          />
+        </label>
+
+        <label class="block">
+          <span class="mb-1 block text-sm font-medium text-slate-700">埠號（留空用預設）</span>
+          <input
+            formControlName="port"
+            type="number"
+            min="1"
+            max="65535"
+            class="w-full rounded border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+          />
+        </label>
+      </div>
+    }
+
+    <label class="block">
+      <span class="mb-1 block text-sm font-medium text-slate-700">
+        {{ isSqlite ? "資料庫檔案路徑 *" : "資料庫名稱 *" }}
+      </span>
+      <input
+        formControlName="database"
+        [placeholder]="isSqlite ? '/path/to/data.db' : ''"
+        class="w-full rounded border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+      />
+    </label>
+
+    @if (!isSqlite) {
+      <div class="grid grid-cols-2 gap-4">
+        <label class="block">
+          <span class="mb-1 block text-sm font-medium text-slate-700">使用者名稱</span>
+          <input
+            formControlName="username"
+            autocomplete="off"
+            class="w-full rounded border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+          />
+        </label>
+
+        <label class="block">
+          <span class="mb-1 block text-sm font-medium text-slate-700">密碼</span>
+          <input
+            formControlName="password"
+            type="password"
+            autocomplete="new-password"
+            class="w-full rounded border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+          />
+        </label>
+      </div>
+    }
+
+    @if (isSqlServer) {
+      <label class="flex items-center gap-2 text-sm text-slate-700">
+        <input formControlName="trustServerCertificate" type="checkbox" class="rounded" />
+        信任自簽憑證（不建議；僅限內網測試環境，啟用將記入審計日誌）
+      </label>
+    }
+
+    <div class="flex items-center gap-4 pt-2">
+      <button
+        type="submit"
+        [disabled]="testing()"
+        class="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+      >
+        {{ testing() ? "測試中…" : "測試連線" }}
+      </button>
+
+      @if (result(); as r) {
+        <span
+          class="text-sm"
+          [class.text-green-600]="r.ok"
+          [class.text-red-600]="!r.ok"
+        >
+          {{ r.message }}
+        </span>
+      }
+    </div>
+  </form>
+
+  <p class="mt-4 text-xs text-slate-500">
+    密碼不會儲存於設定檔；連線設定的持久化（OS keychain）將於後續版本提供。
+  </p>
+</div>

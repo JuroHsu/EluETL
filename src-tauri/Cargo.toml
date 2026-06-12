@@ -1,0 +1,52 @@
+[package]
+name = "elu-etl"
+version = "0.1.0"
+description = "Excel ↔ Database 高效能跨平台 ETL 桌面工具"
+authors = ["Elu Technology Co., Ltd."]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "elu_etl_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri-plugin-dialog = "2.7.1"
+tauri-plugin-fs = "2.5.1"
+tauri-plugin-store = "2.4.3"
+tokio = { version = "1.52.3", features = ["full"] }
+tokio-util = { version = "0.7.18", features = ["compat"] }
+async-trait = "0.1.89"
+futures = "0.3.32"
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "tls-rustls", "postgres", "mysql", "sqlite", "chrono", "rust_decimal"] }
+tiberius = { version = "0.12.3", default-features = false, features = ["rustls", "chrono", "tds73"] }
+deadpool = "0.13.0"
+calamine = { version = "0.35.0", features = ["dates"] }
+rust_xlsxwriter = { version = "0.95.0", features = ["constant_memory", "chrono"] }
+csv = "1.4.0"
+chardetng = "1.0.0"
+encoding_rs = "0.8.35"
+rayon = "1.12.0"
+rust_decimal = "1.42.1"
+sha2 = "0.11.0"
+thiserror = "2.0.18"
+chrono = { version = "0.4.45", features = ["serde"] }
+uuid = { version = "1.23.3", features = ["v4", "serde"] }
+tracing = "0.1.44"
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
