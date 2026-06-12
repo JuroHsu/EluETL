@@ -12,9 +12,13 @@
   "app": {
     "windows": [
       {
-        "title": "elu-etl",
-        "width": 800,
-        "height": 600
+        "title": "Elu ETL",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 1024,
+        "minHeight": 680,
+        "center": true,
+        "resizable": true
       }
     ],
     "security": {
