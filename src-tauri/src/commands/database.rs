@@ -67,6 +67,19 @@ pub async fn delete_connection(
     Ok(())
 }
 
+/// 驗證使用中連線是否可用（狀態列指示燈）。
+#[tauri::command]
+pub async fn ping_connection(
+    state: tauri::State<'_, AppState>,
+    conn_id: Uuid,
+) -> Result<(), EluEtlError> {
+    state
+        .get_or_create_driver(conn_id)
+        .await?
+        .test_connection()
+        .await
+}
+
 #[tauri::command]
 pub async fn get_tables(
     state: tauri::State<'_, AppState>,

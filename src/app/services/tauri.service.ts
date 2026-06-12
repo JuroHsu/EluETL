@@ -103,6 +103,28 @@ export interface QueryPreview {
   rows: unknown[][];
 }
 
+export interface ScriptIssue {
+  line: number;
+  message: string;
+}
+
+export interface ScriptCheck {
+  ok: boolean;
+  statementCount: number;
+  issues: ScriptIssue[];
+}
+
+export interface ScriptJobParams {
+  jobId: string;
+  connId: string;
+  sourcePath: string;
+  sheet: string;
+  hasHeader: boolean;
+  encoding: string | null;
+  batchSize: number;
+  script: string;
+}
+
 /** 對應 Rust `EluEtlError` 的序列化格式。 */
 export interface ApiError {
   code: string;
@@ -135,6 +157,11 @@ export class TauriService {
 
   deleteConnection(connId: string): Promise<void> {
     return invoke<void>("delete_connection", { connId });
+  }
+
+  /** 驗證使用中連線是否可用（狀態列指示燈）。 */
+  pingConnection(connId: string): Promise<void> {
+    return invoke<void>("ping_connection", { connId });
   }
 
   getTables(connId: string): Promise<TableInfo[]> {
@@ -191,6 +218,24 @@ export class TauriService {
     const progress = new Channel<EtlProgress>();
     progress.onmessage = onProgress;
     return invoke<EtlSummary>("resume_etl", { jobId, onProgress: progress });
+  }
+
+  // ---- ETL 腳本 ----
+
+  validateEtlScript(
+    script: string,
+    sourceColumns: string[] | null,
+  ): Promise<ScriptCheck> {
+    return invoke<ScriptCheck>("validate_etl_script", { script, sourceColumns });
+  }
+
+  executeEtlScript(
+    params: ScriptJobParams,
+    onProgress: (p: EtlProgress) => void,
+  ): Promise<EtlSummary> {
+    const progress = new Channel<EtlProgress>();
+    progress.onmessage = onProgress;
+    return invoke<EtlSummary>("execute_etl_script", { params, onProgress: progress });
   }
 }
 

@@ -14,6 +14,29 @@ pub enum DataType {
     Date,
 }
 
+impl DataType {
+    /// DB 原生型別名稱 → 中介型別（INFORMATION_SCHEMA 的 data_type 字串）。
+    pub fn from_db_type(db_type: &str) -> DataType {
+        let t = db_type.to_lowercase();
+        if t.contains("bool") || t == "bit" {
+            DataType::Bool
+        } else if t.contains("int") || t.contains("serial") || t == "year" {
+            DataType::Integer
+        } else if ["decimal", "numeric", "real", "double", "float", "money"]
+            .iter()
+            .any(|k| t.contains(k))
+        {
+            DataType::Float
+        } else if t.contains("datetime") || t.contains("timestamp") {
+            DataType::DateTime
+        } else if t == "date" {
+            DataType::Date
+        } else {
+            DataType::Text
+        }
+    }
+}
+
 /// Excel / CSV / DB 之間的中介值。
 #[derive(Debug, Clone, PartialEq)]
 pub enum CellValue {

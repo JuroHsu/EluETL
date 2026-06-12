@@ -22,4 +22,9 @@ export const routes: Routes = [
     loadComponent: () =>
       import("./pages/execute/execute.page").then((m) => m.ExecutePage),
   },
+  {
+    path: "script",
+    loadComponent: () =>
+      import("./pages/script/script.page").then((m) => m.ScriptPage),
+  },
 ];

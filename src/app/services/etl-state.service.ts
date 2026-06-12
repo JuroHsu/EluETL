@@ -23,6 +23,9 @@ export class EtlStateService {
   readonly job = signal<EtlJobConfig | null>(null);
   readonly summary = signal<EtlSummary | null>(null);
 
+  /** 腳本模式的編輯內容（跨頁保留） */
+  readonly scriptText = signal<string>("");
+
   resetSource(): void {
     this.sourcePath.set(null);
     this.sheets.set([]);

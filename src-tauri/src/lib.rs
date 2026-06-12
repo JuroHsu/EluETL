@@ -43,6 +43,7 @@ pub fn run() {
             commands::database::save_connection,
             commands::database::list_connections,
             commands::database::delete_connection,
+            commands::database::ping_connection,
             commands::database::get_tables,
             commands::database::get_columns,
             commands::database::query_preview,
@@ -52,6 +53,8 @@ pub fn run() {
             commands::etl::execute_etl,
             commands::etl::cancel_etl,
             commands::etl::resume_etl,
+            commands::etl::validate_etl_script,
+            commands::etl::execute_etl_script,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

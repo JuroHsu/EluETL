@@ -32,6 +32,15 @@ pub enum Dialect {
     Sqlite,
 }
 
+pub fn dialect_for(kind: DbKind) -> Dialect {
+    match kind {
+        DbKind::SqlServer => Dialect::Mssql,
+        DbKind::Postgres => Dialect::Postgres,
+        DbKind::MySql => Dialect::MySql,
+        DbKind::Sqlite => Dialect::Sqlite,
+    }
+}
+
 /// 拒絕含引號 / 分號 / 控制字元的 identifier，防止注入與引用逃逸。
 pub fn validate_ident(name: &str) -> Result<(), EluEtlError> {
     let bad = name.is_empty()
@@ -53,10 +62,10 @@ fn quote_ident(dialect: Dialect, name: &str) -> String {
     }
 }
 
-/// 引用表名（支援 `schema.table` 形式，逐段驗證後引用）。
+/// 引用表名（支援 `schema.table` 與 MSSQL 的 `db.schema.table`，逐段驗證後引用）。
 pub fn quote_table(dialect: Dialect, table: &str) -> Result<String, EluEtlError> {
     let parts: Vec<&str> = table.split('.').collect();
-    if parts.len() > 2 {
+    if parts.len() > 3 || (parts.len() == 3 && !matches!(dialect, Dialect::Mssql)) {
         return Err(EluEtlError::Config(format!("不合法的表名: {table:?}")));
     }
     for p in &parts {

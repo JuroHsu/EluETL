@@ -78,6 +78,17 @@
           <path d="M7 5v14l12-7-12-7z" stroke-linejoin="round" />
         </svg>
       </a>
+      <a
+        routerLink="/script"
+        routerLinkActive="border-vs-accent! text-white!"
+        title="ETL 腳本"
+        class="flex h-11 w-full items-center justify-center border-l-2 border-transparent text-vs-muted hover:text-white"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="h-5.5 w-5.5">
+          <path d="M9 4H8a2 2 0 0 0-2 2v3.5c0 1-.8 1.8-1.8 2.5 1 .7 1.8 1.5 1.8 2.5V18a2 2 0 0 0 2 2h1" />
+          <path d="M15 4h1a2 2 0 0 1 2 2v3.5c0 1 .8 1.8 1.8 2.5-1 .7-1.8 1.5-1.8 2.5V18a2 2 0 0 1-2 2h-1" />
+        </svg>
+      </a>
     </nav>
 
     <!-- 主工作區 + 底部輸出面板 -->
@@ -156,10 +167,26 @@
         <span>錯誤 {{ p.errorRows.toLocaleString() }}</span>
       }
     } @else {
-      <span>就緒</span>
+      <span class="flex items-center gap-1.5">
+        @switch (ws.connStatus()) {
+          @case ("connected") {
+            <span class="text-vs-success">●</span> 已連線
+          }
+          @case ("connecting") {
+            <span class="animate-pulse">●</span> 連線中…
+          }
+          @case ("error") {
+            <span class="text-vs-error">●</span> 連線失敗
+          }
+          @default {
+            <span class="opacity-50">○</span> 未選擇連線
+          }
+        }
+      </span>
       @if (ws.activeConnection(); as conn) {
         <span>{{ conn.name }}</span>
       }
+      <span>就緒</span>
     }
     <span class="ml-auto">Elu ETL v0.1.0</span>
   </footer>

@@ -18,6 +18,8 @@ export class WorkspaceService {
   readonly activeConnId = signal<string | null>(null);
   /** 執行中的 ETL 進度（null = 閒置），驅動狀態列 */
   readonly running = signal<EtlProgress | null>(null);
+  /** 使用中連線的健康狀態（狀態列指示燈） */
+  readonly connStatus = signal<"none" | "connecting" | "connected" | "error">("none");
 
   readonly activeConnection = computed(() => {
     const id = this.activeConnId();
@@ -33,6 +35,26 @@ export class WorkspaceService {
     }
     if (!this.activeConnId() && list.length === 1) {
       this.activeConnId.set(list[0].id);
+    }
+  }
+
+  /** ping 使用中連線並更新指示燈（連線切換時呼叫）。 */
+  async pingActive(): Promise<void> {
+    const id = this.activeConnId();
+    if (!id) {
+      this.connStatus.set("none");
+      return;
+    }
+    this.connStatus.set("connecting");
+    try {
+      await this.tauri.pingConnection(id);
+      if (this.activeConnId() === id) {
+        this.connStatus.set("connected");
+      }
+    } catch {
+      if (this.activeConnId() === id) {
+        this.connStatus.set("error");
+      }
     }
   }
 }

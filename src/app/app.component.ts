@@ -5,6 +5,7 @@ import {
   effect,
   inject,
   signal,
+  untracked,
   viewChild,
 } from "@angular/core";
 import { FormsModule } from "@angular/forms";
@@ -33,6 +34,11 @@ export class AppComponent implements OnInit {
       if (el) {
         queueMicrotask(() => (el.scrollTop = el.scrollHeight));
       }
+    });
+    // 切換使用中連線時 ping，更新狀態列指示燈
+    effect(() => {
+      this.ws.activeConnId();
+      untracked(() => void this.ws.pingActive());
     });
   }
 
