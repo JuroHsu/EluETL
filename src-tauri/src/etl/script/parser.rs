@@ -2,7 +2,8 @@
 //! 關鍵字不分大小寫；`--` 為單行註解；識別字可用 `[名稱]` 或裸字。
 
 use crate::etl::script::ast::{
-    Assignment, ColRef, Condition, Expr, Script, ScriptIssue, Statement,
+    Assignment, ColRef, Condition, Expr, FileSource, Script, ScriptHeader, ScriptIssue, SourceDecl,
+    Statement,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -14,6 +15,8 @@ enum Tok {
     Comma,
     LBrace,
     RBrace,
+    LParen,
+    RParen,
     Assign,
     EqEq,
     KwIf,
@@ -144,6 +147,20 @@ fn lex(input: &str) -> Result<Vec<Token>, ScriptIssue> {
                 });
                 i += 1;
             }
+            '(' => {
+                tokens.push(Token {
+                    tok: Tok::LParen,
+                    line,
+                });
+                i += 1;
+            }
+            ')' => {
+                tokens.push(Token {
+                    tok: Tok::RParen,
+                    line,
+                });
+                i += 1;
+            }
             c if c.is_ascii_digit()
                 || (c == '-' && chars.get(i + 1).is_some_and(|n| n.is_ascii_digit())) =>
             {
@@ -212,6 +229,10 @@ struct Parser {
 impl Parser {
     fn peek(&self) -> Option<&Tok> {
         self.tokens.get(self.pos).map(|t| &t.tok)
+    }
+
+    fn peek_at(&self, n: usize) -> Option<&Tok> {
+        self.tokens.get(self.pos + n).map(|t| &t.tok)
     }
 
     fn line(&self) -> usize {
@@ -301,6 +322,130 @@ impl Parser {
         }
     }
 
+    fn expect_str(&mut self, line: usize, what: &str) -> Result<String, ScriptIssue> {
+        match self.next() {
+            Some(Token {
+                tok: Tok::Str(s), ..
+            }) => Ok(s),
+            _ => Err(err(line, what.to_string())),
+        }
+    }
+
+    /// 下兩個 token 是否為 `SOURCE =` / `TARGET =` 標頭開頭。
+    fn peek_header_keyword(&self) -> Option<String> {
+        match (self.peek(), self.peek_at(1)) {
+            (Some(Tok::Ident(s)), Some(Tok::Assign)) => {
+                let up = s.to_uppercase();
+                (up == "SOURCE" || up == "TARGET").then_some(up)
+            }
+            _ => None,
+        }
+    }
+
+    /// 標頭區：`SOURCE = FILE(...)` / `SOURCE = CONNECTION('名稱')` /
+    /// `TARGET = CONNECTION('名稱')`，順序不拘，皆為選擇性。
+    fn parse_header(&mut self) -> Result<ScriptHeader, ScriptIssue> {
+        let mut header = ScriptHeader::default();
+        while let Some(keyword) = self.peek_header_keyword() {
+            let line = self.line();
+            self.next(); // SOURCE / TARGET
+            self.next(); // =
+            if keyword == "SOURCE" {
+                if header.source.is_some() {
+                    return Err(err(line, "重複的 SOURCE 宣告"));
+                }
+                header.source = Some(self.parse_source_decl(line)?);
+            } else {
+                if header.target_connection.is_some() {
+                    return Err(err(line, "重複的 TARGET 宣告"));
+                }
+                header.target_connection = Some(self.parse_connection_ref(line)?);
+            }
+        }
+        Ok(header)
+    }
+
+    fn parse_source_decl(&mut self, line: usize) -> Result<SourceDecl, ScriptIssue> {
+        let (func, _) = self.expect_ident("FILE(...) 或 CONNECTION('名稱')")?;
+        match func.to_uppercase().as_str() {
+            "FILE" => Ok(SourceDecl::File(self.parse_file_args(line)?)),
+            "CONNECTION" => Ok(SourceDecl::Connection(self.parse_connection_args(line)?)),
+            other => Err(err(
+                line,
+                format!("未知的來源型式 {other}（支援 FILE / CONNECTION）"),
+            )),
+        }
+    }
+
+    fn parse_connection_ref(&mut self, line: usize) -> Result<String, ScriptIssue> {
+        let (func, _) = self.expect_ident("CONNECTION('已儲存連線名稱')")?;
+        if func.to_uppercase() != "CONNECTION" {
+            return Err(err(
+                line,
+                "TARGET 僅支援 CONNECTION('已儲存連線名稱')——密碼存於系統金鑰圈，不寫入腳本",
+            ));
+        }
+        self.parse_connection_args(line)
+    }
+
+    fn parse_connection_args(&mut self, line: usize) -> Result<String, ScriptIssue> {
+        if self.next().map(|t| t.tok) != Some(Tok::LParen) {
+            return Err(err(line, "CONNECTION 之後預期 `(`"));
+        }
+        let name = self.expect_str(line, "CONNECTION 參數需為字串（'連線名稱'）")?;
+        if self.next().map(|t| t.tok) != Some(Tok::RParen) {
+            return Err(err(line, "CONNECTION('...') 缺少 `)`"));
+        }
+        Ok(name)
+    }
+
+    fn parse_file_args(&mut self, line: usize) -> Result<FileSource, ScriptIssue> {
+        if self.next().map(|t| t.tok) != Some(Tok::LParen) {
+            return Err(err(line, "FILE 之後預期 `(`"));
+        }
+        let mut fs = FileSource::default();
+        let mut first = true;
+        loop {
+            if self.peek() == Some(&Tok::RParen) {
+                self.next();
+                break;
+            }
+            if !first && self.next().map(|t| t.tok) != Some(Tok::Comma) {
+                return Err(err(self.line(), "FILE 參數之間需以 `,` 分隔"));
+            }
+            first = false;
+            let (key, kline) =
+                self.expect_ident("FILE 參數名稱（PATH / SHEET / ENCODING / HEADER / TYPE）")?;
+            if self.next().map(|t| t.tok) != Some(Tok::Assign) {
+                return Err(err(kline, format!("{key} 之後預期 `=`")));
+            }
+            match key.to_uppercase().as_str() {
+                // TYPE 僅供可讀性，實際格式依副檔名判斷
+                "TYPE" => match self.next().map(|t| t.tok) {
+                    Some(Tok::Ident(_)) | Some(Tok::Str(_)) => {}
+                    _ => return Err(err(kline, "TYPE 需為格式名稱（如 CSV、XLSX）")),
+                },
+                "PATH" => fs.path = self.expect_str(kline, "PATH 需為字串（'...'）")?,
+                "SHEET" => fs.sheet = Some(self.expect_str(kline, "SHEET 需為字串")?),
+                "ENCODING" => {
+                    fs.encoding = Some(self.expect_str(kline, "ENCODING 需為字串（如 'Big5'）")?)
+                }
+                "HEADER" => {
+                    fs.has_header = Some(match self.next().map(|t| t.tok) {
+                        Some(Tok::KwTrue) => true,
+                        Some(Tok::KwFalse) => false,
+                        _ => return Err(err(kline, "HEADER 需為 TRUE / FALSE")),
+                    })
+                }
+                other => return Err(err(kline, format!("未知的 FILE 參數 {other}"))),
+            }
+        }
+        if fs.path.is_empty() {
+            return Err(err(line, "FILE(...) 需要 PATH 參數"));
+        }
+        Ok(fs)
+    }
+
     fn parse_statement(&mut self) -> Result<Statement, ScriptIssue> {
         let stmt_line = self.line();
 
@@ -378,10 +523,11 @@ impl Parser {
     }
 }
 
-/// 解析整份腳本（陳述式以 GO 分隔；結尾 GO 可省略）。
+/// 解析整份腳本（選擇性 SOURCE/TARGET 標頭 + 以 GO 分隔的陳述式）。
 pub fn parse(input: &str) -> Result<Script, ScriptIssue> {
     let tokens = lex(input)?;
     let mut parser = Parser { tokens, pos: 0 };
+    let header = parser.parse_header()?;
     let mut statements = Vec::new();
 
     loop {
@@ -403,7 +549,7 @@ pub fn parse(input: &str) -> Result<Script, ScriptIssue> {
     if statements.is_empty() {
         return Err(err(1, "腳本為空"));
     }
-    Ok(Script { statements })
+    Ok(Script { header, statements })
 }
 
 #[cfg(test)]
@@ -475,6 +621,55 @@ GO
 
         let e = parse("If a == b\n[t] ADD { x = 1 }").unwrap_err();
         assert!(e.message.contains("右側"));
+    }
+
+    #[test]
+    fn parses_source_target_header() {
+        let script = parse(
+            r#"
+SOURCE = FILE(TYPE=CSV, PATH='C:\data\users.csv', SHEET='SHEET1', ENCODING='Big5', HEADER=TRUE)
+TARGET = CONNECTION('正式環境 ERP')
+
+[t] ADD { x = 1 }
+GO
+"#,
+        )
+        .unwrap();
+        let Some(SourceDecl::File(f)) = &script.header.source else {
+            panic!("expected file source");
+        };
+        assert_eq!(f.path, r"C:\data\users.csv");
+        assert_eq!(f.sheet.as_deref(), Some("SHEET1"));
+        assert_eq!(f.encoding.as_deref(), Some("Big5"));
+        assert_eq!(f.has_header, Some(true));
+        assert_eq!(
+            script.header.target_connection.as_deref(),
+            Some("正式環境 ERP")
+        );
+    }
+
+    #[test]
+    fn parses_source_connection_ref_and_no_header() {
+        let script = parse("SOURCE = CONNECTION('月結檔')\n[t] ADD { x = 1 }").unwrap();
+        assert_eq!(
+            script.header.source,
+            Some(SourceDecl::Connection("月結檔".into()))
+        );
+        assert!(script.header.target_connection.is_none());
+
+        // 無標頭照常解析
+        let script = parse("[t] ADD { x = 1 }").unwrap();
+        assert!(script.header.source.is_none());
+    }
+
+    #[test]
+    fn header_errors() {
+        // TARGET 不接受 FILE（目標必須是資料庫連線）
+        let e = parse("TARGET = FILE(PATH='x')\n[t] ADD { x = 1 }").unwrap_err();
+        assert!(e.message.contains("CONNECTION"));
+        // FILE 缺 PATH
+        let e = parse("SOURCE = FILE(TYPE=CSV)\n[t] ADD { x = 1 }").unwrap_err();
+        assert!(e.message.contains("PATH"));
     }
 
     #[test]

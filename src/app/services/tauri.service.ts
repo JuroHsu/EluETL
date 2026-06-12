@@ -1,7 +1,7 @@
 import { Injectable } from "@angular/core";
 import { Channel, invoke } from "@tauri-apps/api/core";
 
-export type DbKind = "sqlserver" | "postgres" | "mysql" | "sqlite";
+export type DbKind = "sqlserver" | "postgres" | "mysql" | "sqlite" | "file";
 export type DataType = "integer" | "float" | "text" | "bool" | "datetime" | "date";
 export type NullPolicy = "allow" | "error";
 
@@ -12,9 +12,16 @@ export interface ConnectionConfig {
   kind: DbKind;
   host: string;
   port: number | null;
+  /** 檔案連線時為檔案路徑 */
   database: string;
   username: string;
   trustServerCertificate: boolean;
+  /** 檔案連線：工作表（null = 第一個） */
+  sheet?: string | null;
+  /** 檔案連線：CSV 編碼覆寫（null = 自動偵測） */
+  encoding?: string | null;
+  /** 檔案連線：首列為欄名（null = true） */
+  hasHeader?: boolean | null;
 }
 
 export interface TableInfo {
@@ -114,12 +121,13 @@ export interface ScriptCheck {
   issues: ScriptIssue[];
 }
 
+/** 腳本任務參數：來源/目標可省略（腳本 SOURCE/TARGET 標頭優先）。 */
 export interface ScriptJobParams {
   jobId: string;
-  connId: string;
-  sourcePath: string;
-  sheet: string;
-  hasHeader: boolean;
+  connId: string | null;
+  sourcePath: string | null;
+  sheet: string | null;
+  hasHeader: boolean | null;
   encoding: string | null;
   batchSize: number;
   script: string;
@@ -236,6 +244,14 @@ export class TauriService {
     const progress = new Channel<EtlProgress>();
     progress.onmessage = onProgress;
     return invoke<EtlSummary>("execute_etl_script", { params, onProgress: progress });
+  }
+
+  loadEtlFile(path: string): Promise<string> {
+    return invoke<string>("load_etl_file", { path });
+  }
+
+  saveEtlFile(path: string, content: string): Promise<void> {
+    return invoke<void>("save_etl_file", { path, content });
   }
 }
 

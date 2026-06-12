@@ -1,7 +1,7 @@
 //! ETL 腳本端對端整合測試：CSV 來源 → lookup join（email 比對）→ SQLite 寫入。
 
 use elu_etl_lib::db::{self, Dialect};
-use elu_etl_lib::etl::script::executor::{run, ScriptJobParams};
+use elu_etl_lib::etl::script::executor::{run, ResolvedScriptJob};
 use elu_etl_lib::etl::script::parser;
 use elu_etl_lib::models::connection::{ConnectionConfig, DbKind};
 use elu_etl_lib::models::value::CellValue;
@@ -33,8 +33,11 @@ async fn script_lookup_join_end_to_end() {
         database: db_path.to_str().unwrap().into(),
         username: String::new(),
         trust_server_certificate: false,
+        sheet: None,
+        encoding: None,
+        has_header: None,
     };
-    let driver = db::create_driver(&config, &SecretString::new(String::new()));
+    let driver = db::create_driver(&config, &SecretString::new(String::new())).unwrap();
     driver
         .query_all(
             "CREATE TABLE Account (Id INTEGER PRIMARY KEY, email TEXT NOT NULL)",
@@ -75,15 +78,13 @@ GO
 "#;
     let script = parser::parse(script_text).unwrap();
 
-    let params = ScriptJobParams {
+    let params = ResolvedScriptJob {
         job_id: Uuid::new_v4(),
-        conn_id: config.id,
         source_path: csv_path.to_str().unwrap().into(),
         sheet: "CSV".into(),
         has_header: true,
         encoding: None,
         batch_size: 5000,
-        script: script_text.into(),
     };
 
     let summary = run(
@@ -139,8 +140,11 @@ async fn script_without_condition_inserts_all() {
         database: db_path.to_str().unwrap().into(),
         username: String::new(),
         trust_server_certificate: false,
+        sheet: None,
+        encoding: None,
+        has_header: None,
     };
-    let driver = db::create_driver(&config, &SecretString::new(String::new()));
+    let driver = db::create_driver(&config, &SecretString::new(String::new())).unwrap();
     driver
         .query_all(
             "CREATE TABLE items (name TEXT, qty INTEGER, src TEXT)",
@@ -154,15 +158,13 @@ async fn script_without_condition_inserts_all() {
     let summary = run(
         driver.clone(),
         Dialect::Sqlite,
-        ScriptJobParams {
+        ResolvedScriptJob {
             job_id: Uuid::new_v4(),
-            conn_id: config.id,
             source_path: csv_path.to_str().unwrap().into(),
             sheet: "CSV".into(),
             has_header: true,
             encoding: None,
             batch_size: 5000,
-            script: script_text.into(),
         },
         script,
         |_| {},

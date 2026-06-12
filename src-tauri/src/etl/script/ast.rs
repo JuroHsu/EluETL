@@ -68,8 +68,33 @@ pub struct Statement {
     pub line: usize,
 }
 
+/// SOURCE 宣告：inline 檔案參數，或以名稱引用已儲存的檔案連線。
+#[derive(Debug, Clone, PartialEq)]
+pub enum SourceDecl {
+    File(FileSource),
+    Connection(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FileSource {
+    pub path: String,
+    pub sheet: Option<String>,
+    pub encoding: Option<String>,
+    pub has_header: Option<bool>,
+}
+
+/// 腳本標頭：讓 .etl 檔自包含來源與目標。
+/// 安全政策：TARGET 僅支援 CONNECTION('已儲存連線名稱') —
+/// 密碼一律留在 OS keychain，絕不寫入腳本檔。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ScriptHeader {
+    pub source: Option<SourceDecl>,
+    pub target_connection: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Script {
+    pub header: ScriptHeader,
     pub statements: Vec<Statement>,
 }
 

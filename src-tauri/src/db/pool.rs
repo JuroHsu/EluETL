@@ -53,13 +53,13 @@ impl AppState {
             return Ok(d.clone());
         }
         let config = self.store()?.get_connection(&id).await?;
-        let password = if config.kind == DbKind::Sqlite {
+        let password = if matches!(config.kind, DbKind::Sqlite | DbKind::File) {
             None
         } else {
             tokio::task::spawn_blocking(move || keychain::load_password(&id)).await??
         };
         let password = password.unwrap_or_else(|| SecretString::new(String::new()));
-        let driver = db::create_driver(&config, &password);
+        let driver = db::create_driver(&config, &password)?;
         self.insert_driver(id, driver.clone()).await;
         Ok(driver)
     }

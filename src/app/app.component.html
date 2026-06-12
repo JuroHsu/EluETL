@@ -5,26 +5,50 @@
   >
     <span class="text-xs font-semibold tracking-widest text-vs-muted">ELU ETL</span>
 
+    <!-- 來源（檔案連線或手動載入） -->
     <div class="flex items-center gap-1.5">
+      <span class="text-[11px] text-vs-muted">來源</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="h-4 w-4 text-vs-muted">
+        <path d="M13 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9l-6-6z" />
+        <path d="M13 3v6h6" />
+      </svg>
+      <select
+        [ngModel]="ws.sourceConnId()"
+        (ngModelChange)="ws.sourceConnId.set($event)"
+        class="vs-input h-6 min-w-40 text-xs"
+        title="來源（檔案連線）"
+      >
+        <option [ngValue]="null">— 手動（匯入資料頁）—</option>
+        @for (c of ws.fileConnections(); track c.id) {
+          <option [ngValue]="c.id">{{ c.name }}</option>
+        }
+      </select>
+    </div>
+
+    <span class="text-vs-muted">→</span>
+
+    <!-- 目標（資料庫連線） -->
+    <div class="flex items-center gap-1.5">
+      <span class="text-[11px] text-vs-muted">目標</span>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="h-4 w-4 text-vs-muted">
         <ellipse cx="12" cy="5" rx="7" ry="3" />
         <path d="M5 5v14c0 1.66 3.13 3 7 3s7-1.34 7-3V5" />
         <path d="M5 12c0 1.66 3.13 3 7 3s7-1.34 7-3" />
       </svg>
       <select
-        [ngModel]="ws.activeConnId()"
-        (ngModelChange)="ws.activeConnId.set($event)"
-        class="vs-input h-6 min-w-44 text-xs"
-        title="使用中連線"
+        [ngModel]="ws.targetConnId()"
+        (ngModelChange)="ws.targetConnId.set($event)"
+        class="vs-input h-6 min-w-40 text-xs"
+        title="目標（資料庫連線）"
       >
-        <option [ngValue]="null">— 未選擇連線 —</option>
-        @for (c of ws.connections(); track c.id) {
+        <option [ngValue]="null">— 未選擇 —</option>
+        @for (c of ws.dbConnections(); track c.id) {
           <option [ngValue]="c.id">{{ c.name }}</option>
         }
       </select>
     </div>
 
-    @if (ws.activeConnection(); as conn) {
+    @if (ws.targetConnection(); as conn) {
       <span class="text-[11px] text-vs-muted">
         {{ conn.kind === "sqlite" ? conn.database : conn.host + " / " + conn.database }}
       </span>
@@ -183,7 +207,7 @@
           }
         }
       </span>
-      @if (ws.activeConnection(); as conn) {
+      @if (ws.targetConnection(); as conn) {
         <span>{{ conn.name }}</span>
       }
       <span>就緒</span>

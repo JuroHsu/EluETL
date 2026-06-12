@@ -20,10 +20,15 @@
           [class.bg-vs-active]="editingId() === conn.id"
         >
           <div class="min-w-0">
-            <div class="truncate text-[13px]">{{ conn.name }}</div>
+            <div class="truncate text-[13px]">
+              {{ conn.name }}
+              <span class="ml-1 text-[10px] text-vs-muted">
+                {{ conn.kind === "file" ? "來源" : "目標" }}
+              </span>
+            </div>
             <div class="truncate text-[11px] text-vs-muted">
               {{ kindLabel(conn.kind) }} ·
-              {{ conn.kind === "sqlite" ? conn.database : conn.host + "/" + conn.database }}
+              {{ conn.kind === "sqlite" || conn.kind === "file" ? conn.database : conn.host + "/" + conn.database }}
             </div>
           </div>
           <button
@@ -55,8 +60,9 @@
         <input formControlName="name" placeholder="例如：正式環境 ERP" class="vs-input w-full" />
       </label>
       <label>
-        <span class="vs-label">資料庫類型</span>
+        <span class="vs-label">類型</span>
         <select formControlName="kind" class="vs-input w-full">
+          <option value="file">檔案來源（Excel / CSV）</option>
           <option value="sqlserver">SQL Server</option>
           <option value="postgres">PostgreSQL</option>
           <option value="mysql">MySQL</option>
@@ -65,7 +71,7 @@
       </label>
     </div>
 
-    @if (!isSqlite) {
+    @if (isDbWithAuth) {
       <div class="grid grid-cols-3 gap-3">
         <label class="col-span-2">
           <span class="vs-label">主機</span>
@@ -79,15 +85,43 @@
     }
 
     <label class="block">
-      <span class="vs-label">{{ isSqlite ? "資料庫檔案路徑 *" : "資料庫名稱 *" }}</span>
-      <input
-        formControlName="database"
-        [placeholder]="isSqlite ? '/path/to/data.db' : ''"
-        class="vs-input w-full"
-      />
+      <span class="vs-label">
+        {{ isFile ? "檔案路徑 *" : isSqlite ? "資料庫檔案路徑 *" : "資料庫名稱 *" }}
+      </span>
+      <div class="flex gap-2">
+        <input
+          formControlName="database"
+          [placeholder]="isFile ? '/path/to/data.xlsx' : isSqlite ? '/path/to/data.db' : ''"
+          class="vs-input w-full"
+        />
+        @if (isFile) {
+          <button type="button" (click)="pickFile()" class="vs-btn-secondary shrink-0">瀏覽…</button>
+        }
+      </div>
     </label>
 
-    @if (!isSqlite) {
+    @if (isFile) {
+      <div class="grid grid-cols-3 gap-3">
+        <label>
+          <span class="vs-label">工作表（空 = 第一個）</span>
+          <input formControlName="sheet" placeholder="Sheet1" class="vs-input w-full" />
+        </label>
+        <label>
+          <span class="vs-label">CSV 編碼</span>
+          <select formControlName="encoding" class="vs-input w-full">
+            @for (e of encodings; track e.label) {
+              <option [value]="e.value">{{ e.label }}</option>
+            }
+          </select>
+        </label>
+        <label class="flex items-end gap-2 pb-1.5 text-xs text-vs-text">
+          <input formControlName="hasHeader" type="checkbox" class="accent-vs-accent" />
+          首列為欄位名稱
+        </label>
+      </div>
+    }
+
+    @if (isDbWithAuth) {
       <div class="grid grid-cols-2 gap-3">
         <label>
           <span class="vs-label">使用者名稱</span>
@@ -114,23 +148,20 @@
 
     <div class="flex items-center gap-2 pt-1">
       <button type="submit" [disabled]="busy()" class="vs-btn-secondary">
-        {{ busy() ? "處理中…" : "測試連線" }}
+        {{ busy() ? "處理中…" : isFile ? "測試讀取" : "測試連線" }}
       </button>
       <button type="button" (click)="save()" [disabled]="busy()" class="vs-btn">儲存連線</button>
 
       @if (result(); as r) {
-        <span
-          class="text-xs"
-          [class.text-vs-success]="r.ok"
-          [class.text-vs-error]="!r.ok"
-        >
+        <span class="text-xs" [class.text-vs-success]="r.ok" [class.text-vs-error]="!r.ok">
           {{ r.message }}
         </span>
       }
     </div>
 
     <p class="pt-2 text-[11px] text-vs-muted">
-      密碼不寫入設定檔，僅存於作業系統金鑰圈（macOS Keychain / Windows 認證管理員 / Linux Secret Service）。
+      檔案連線可作為 ETL 來源（頂部工具列「來源」）；資料庫連線的密碼僅存於作業系統金鑰圈，
+      .etl 腳本以 CONNECTION('名稱') 引用連線，不含任何機密。
     </p>
   </form>
 </div>

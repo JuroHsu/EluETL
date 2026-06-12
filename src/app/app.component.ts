@@ -35,9 +35,9 @@ export class AppComponent implements OnInit {
         queueMicrotask(() => (el.scrollTop = el.scrollHeight));
       }
     });
-    // 切換使用中連線時 ping，更新狀態列指示燈
+    // 切換目標連線時 ping，更新狀態列指示燈
     effect(() => {
-      this.ws.activeConnId();
+      this.ws.targetConnId();
       untracked(() => void this.ws.pingActive());
     });
   }

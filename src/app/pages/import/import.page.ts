@@ -1,11 +1,16 @@
-import { Component, inject, signal } from "@angular/core";
+import { Component, effect, inject, signal, untracked } from "@angular/core";
 import { FormsModule } from "@angular/forms";
 import { Router } from "@angular/router";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import { EtlStateService } from "../../services/etl-state.service";
 import { LogService } from "../../services/log.service";
-import { TauriService, errorMessage } from "../../services/tauri.service";
+import {
+  ConnectionConfig,
+  TauriService,
+  errorMessage,
+} from "../../services/tauri.service";
+import { WorkspaceService } from "../../services/workspace.service";
 
 /** 顯示記憶體警示的行數閾值（開發計畫 §2.2.2：calamine 整檔載入）。 */
 const LARGE_FILE_ROWS = 500_000;
@@ -19,10 +24,46 @@ export class ImportPage {
   private readonly tauri = inject(TauriService);
   private readonly router = inject(Router);
   private readonly log = inject(LogService);
+  readonly ws = inject(WorkspaceService);
   readonly state = inject(EtlStateService);
 
   readonly loading = signal(false);
   readonly error = signal<string | null>(null);
+  private lastLoadedConnId: string | null = null;
+
+  constructor() {
+    // 頂部工具列選擇「來源」檔案連線時自動載入
+    effect(() => {
+      const conn = this.ws.sourceConnection();
+      untracked(() => {
+        if (conn && conn.id !== this.lastLoadedConnId) {
+          this.lastLoadedConnId = conn.id;
+          void this.loadFromConnection(conn);
+        }
+      });
+    });
+  }
+
+  private async loadFromConnection(conn: ConnectionConfig): Promise<void> {
+    this.state.resetSource();
+    this.state.sourcePath.set(conn.database);
+    this.state.encoding.set(conn.encoding ?? null);
+    this.state.hasHeader.set(conn.hasHeader ?? true);
+    this.error.set(null);
+    this.loading.set(true);
+    try {
+      const sheets = await this.tauri.listSheets(conn.database);
+      this.state.sheets.set(sheets);
+      this.state.sheet.set(conn.sheet || sheets[0] || "");
+      await this.loadPreview();
+      this.log.info("匯入", `已載入來源連線「${conn.name}」`);
+    } catch (e) {
+      this.error.set(errorMessage(e));
+      this.log.error("匯入", errorMessage(e));
+    } finally {
+      this.loading.set(false);
+    }
+  }
 
   readonly largeFileRows = LARGE_FILE_ROWS;
   readonly encodings = [

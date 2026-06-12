@@ -14,13 +14,23 @@ use crate::security::secrets::SecretString;
 use driver::DbDriver;
 
 /// 驅動工廠：依資料庫種類建立對應驅動（tiberius 或 sqlx）。
-pub fn create_driver(config: &ConnectionConfig, password: &SecretString) -> Arc<dyn DbDriver> {
-    match config.kind {
+/// 檔案連線（DbKind::File）不是資料庫，不可建立驅動。
+pub fn create_driver(
+    config: &ConnectionConfig,
+    password: &SecretString,
+) -> Result<Arc<dyn DbDriver>, EluEtlError> {
+    Ok(match config.kind {
         DbKind::SqlServer => Arc::new(mssql::MssqlDriver::new(config.clone(), password.clone())),
         DbKind::Postgres => Arc::new(postgres::PostgresDriver::new(config, password)),
         DbKind::MySql => Arc::new(mysql::MySqlDriver::new(config, password)),
         DbKind::Sqlite => Arc::new(sqlite::SqliteDriver::new(config)),
-    }
+        DbKind::File => {
+            return Err(EluEtlError::Config(format!(
+                "「{}」是檔案連線，僅能作為 ETL 來源，不能作為資料庫目標",
+                config.name
+            )))
+        }
+    })
 }
 
 /// SQL 方言（identifier 引用規則）。
@@ -32,12 +42,13 @@ pub enum Dialect {
     Sqlite,
 }
 
-pub fn dialect_for(kind: DbKind) -> Dialect {
+pub fn dialect_for(kind: DbKind) -> Result<Dialect, EluEtlError> {
     match kind {
-        DbKind::SqlServer => Dialect::Mssql,
-        DbKind::Postgres => Dialect::Postgres,
-        DbKind::MySql => Dialect::MySql,
-        DbKind::Sqlite => Dialect::Sqlite,
+        DbKind::SqlServer => Ok(Dialect::Mssql),
+        DbKind::Postgres => Ok(Dialect::Postgres),
+        DbKind::MySql => Ok(Dialect::MySql),
+        DbKind::Sqlite => Ok(Dialect::Sqlite),
+        DbKind::File => Err(EluEtlError::Config("檔案連線沒有 SQL 方言".into())),
     }
 }
 

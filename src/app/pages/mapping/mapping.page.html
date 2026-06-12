@@ -25,14 +25,25 @@
       @if (loading()) {
         <span class="text-[11px] text-vs-muted">載入中…</span>
       }
-      @if (!ws.activeConnId()) {
+      @if (!ws.targetConnId()) {
         <span class="text-[11px] text-vs-warn">請先於上方工具列選擇連線</span>
       }
 
       @if (targetColumns().length) {
-        <button type="button" (click)="proceed()" [disabled]="!canProceed()" class="vs-btn ml-auto h-6">
-          下一步：執行 →
-        </button>
+        <div class="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            (click)="toScript()"
+            [disabled]="!canProceed()"
+            title="轉為可儲存 / 編輯的 .etl 腳本"
+            class="vs-btn-secondary h-6"
+          >
+            轉為腳本
+          </button>
+          <button type="button" (click)="proceed()" [disabled]="!canProceed()" class="vs-btn h-6">
+            下一步：執行 →
+          </button>
+        </div>
       }
     }
   </div>
@@ -137,7 +148,7 @@
   } @else {
     <div class="flex flex-1 items-center justify-center">
       <p class="text-sm text-vs-muted">
-        {{ ws.activeConnId() ? "選擇目標資料表後開始對應" : "請先於上方工具列選擇使用中連線" }}
+        {{ ws.targetConnId() ? "選擇目標資料表後開始對應" : "請先於上方工具列選擇使用中連線" }}
       </p>
     </div>
   }

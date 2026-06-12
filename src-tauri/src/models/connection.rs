@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// 支援的資料庫種類。
+/// 連線種類：四種資料庫 + 檔案來源（Excel / CSV）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DbKind {
@@ -9,6 +9,9 @@ pub enum DbKind {
     Postgres,
     MySql,
     Sqlite,
+    /// 檔案來源連線：`database` 為檔案路徑，搭配 `sheet` / `encoding` /
+    /// `has_header`；僅可作為 ETL 來源，不可作為目標
+    File,
 }
 
 /// 連線設定（不含密碼）。
@@ -33,6 +36,15 @@ pub struct ConnectionConfig {
     /// 開啟需使用者明確勾選，且必須記入審計日誌。
     #[serde(default)]
     pub trust_server_certificate: bool,
+    /// 檔案連線：工作表名稱（None = 第一個工作表 / CSV）
+    #[serde(default)]
+    pub sheet: Option<String>,
+    /// 檔案連線：CSV 編碼覆寫（None = 自動偵測）
+    #[serde(default)]
+    pub encoding: Option<String>,
+    /// 檔案連線：首列是否為欄名（None = true）
+    #[serde(default)]
+    pub has_header: Option<bool>,
 }
 
 impl ConnectionConfig {
@@ -41,7 +53,7 @@ impl ConnectionConfig {
             DbKind::SqlServer => 1433,
             DbKind::Postgres => 5432,
             DbKind::MySql => 3306,
-            DbKind::Sqlite => 0,
+            DbKind::Sqlite | DbKind::File => 0,
         }
     }
 

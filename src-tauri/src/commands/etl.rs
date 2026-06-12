@@ -6,9 +6,10 @@ use crate::db;
 use crate::db::pool::AppState;
 use crate::etl::executor::{self, EtlProgress, EtlSummary};
 use crate::etl::mapping::EtlJobConfig;
-use crate::etl::script::ast::{Expr, ScriptIssue};
-use crate::etl::script::executor::ScriptJobParams;
+use crate::etl::script::ast::{Expr, ScriptHeader, ScriptIssue, SourceDecl};
+use crate::etl::script::executor::{ResolvedScriptJob, ScriptJobParams};
 use crate::etl::script::{self, parser};
+use crate::models::connection::{ConnectionConfig, DbKind};
 use crate::models::errors::EluEtlError;
 
 /// 執行 ETL 任務（進度經 Channel 即時推送）。
@@ -105,6 +106,95 @@ pub fn validate_etl_script(script: String, source_columns: Option<Vec<String>>) 
     }
 }
 
+/// 解析腳本標頭 + 工作區回退，產出目標連線與具體任務參數。
+/// 優先序：腳本 SOURCE/TARGET > 工作區選擇（params 內的值）。
+async fn resolve_script_job(
+    state: &AppState,
+    params: &ScriptJobParams,
+    header: &ScriptHeader,
+) -> Result<(ConnectionConfig, ResolvedScriptJob), EluEtlError> {
+    let store = state.store()?;
+
+    // 目標連線
+    let target = match &header.target_connection {
+        Some(name) => store.get_connection_by_name(name).await?,
+        None => {
+            let id = params.conn_id.ok_or_else(|| {
+                EluEtlError::Config(
+                    "未指定目標：請在腳本加入 TARGET = CONNECTION('連線名稱')，\
+                     或於上方工具列選擇目標連線"
+                        .into(),
+                )
+            })?;
+            store.get_connection(&id).await?
+        }
+    };
+    if target.kind == DbKind::File {
+        return Err(EluEtlError::Config(format!(
+            "「{}」是檔案連線，不能作為目標",
+            target.name
+        )));
+    }
+
+    // 來源檔案
+    let (path, sheet_opt, encoding, has_header) = match &header.source {
+        Some(SourceDecl::File(f)) => (
+            f.path.clone(),
+            f.sheet.clone(),
+            f.encoding.clone(),
+            f.has_header,
+        ),
+        Some(SourceDecl::Connection(name)) => {
+            let c = store.get_connection_by_name(name).await?;
+            if c.kind != DbKind::File {
+                return Err(EluEtlError::Config(format!(
+                    "SOURCE 連線「{name}」不是檔案連線（資料庫作為來源尚未支援）"
+                )));
+            }
+            (c.database, c.sheet, c.encoding, c.has_header)
+        }
+        None => {
+            let p = params.source_path.clone().ok_or_else(|| {
+                EluEtlError::Config(
+                    "未指定來源：請在腳本加入 SOURCE = FILE(PATH='...') 或 \
+                     SOURCE = CONNECTION('檔案連線名稱')，或先於「匯入資料」載入檔案"
+                        .into(),
+                )
+            })?;
+            (
+                p,
+                params.sheet.clone(),
+                params.encoding.clone(),
+                params.has_header,
+            )
+        }
+    };
+
+    let sheet = match sheet_opt {
+        Some(s) => s,
+        None => {
+            let p = path.clone();
+            tokio::task::spawn_blocking(move || crate::excel::source::list_sheets(&p))
+                .await??
+                .into_iter()
+                .next()
+                .ok_or_else(|| EluEtlError::Excel("來源檔沒有工作表".into()))?
+        }
+    };
+
+    Ok((
+        target,
+        ResolvedScriptJob {
+            job_id: params.job_id,
+            source_path: path,
+            sheet,
+            has_header: has_header.unwrap_or(true),
+            encoding,
+            batch_size: params.batch_size.max(1),
+        },
+    ))
+}
+
 /// 執行 ETL 腳本（lookup join + 批次寫入；進度經 Channel 推送）。
 #[tauri::command]
 pub async fn execute_etl_script(
@@ -113,15 +203,16 @@ pub async fn execute_etl_script(
     on_progress: Channel<EtlProgress>,
 ) -> Result<EtlSummary, EluEtlError> {
     let parsed = script::executor::run_blocking_parse(&params.script)?;
-    let config = state.store()?.get_connection(&params.conn_id).await?;
-    let dialect = db::dialect_for(config.kind);
-    let driver = state.get_or_create_driver(params.conn_id).await?;
+    let (target, resolved) = resolve_script_job(&state, &params, &parsed.header).await?;
+    let dialect = db::dialect_for(target.kind)?;
+    let driver = state.get_or_create_driver(target.id).await?;
 
     let job_id = params.job_id;
     tracing::info!(
         target: "audit",
         job_id = %job_id,
-        conn_id = %params.conn_id,
+        target_conn = %target.name,
+        source = %resolved.source_path,
         statements = parsed.statements.len(),
         "腳本任務開始"
     );
@@ -129,9 +220,24 @@ pub async fn execute_etl_script(
     let emit = move |p: EtlProgress| {
         let _ = on_progress.send(p);
     };
-    let result = script::executor::run(driver, dialect, params, parsed, emit, cancel).await;
+    let result = script::executor::run(driver, dialect, resolved, parsed, emit, cancel).await;
     state.finish_job(&job_id);
     result
+}
+
+/// 讀取 .etl 腳本檔。
+#[tauri::command]
+pub async fn load_etl_file(path: String) -> Result<String, EluEtlError> {
+    Ok(tokio::task::spawn_blocking(move || std::fs::read_to_string(path)).await??)
+}
+
+/// 儲存 .etl 腳本檔。
+#[tauri::command]
+pub async fn save_etl_file(path: String, content: String) -> Result<(), EluEtlError> {
+    let log_path = path.clone();
+    tokio::task::spawn_blocking(move || std::fs::write(&path, content)).await??;
+    tracing::info!(target: "audit", path = %log_path, "已儲存 ETL 腳本");
+    Ok(())
 }
 
 /// 續跑：驗證來源檔 SHA-256 未變更後，自最後成功批次的下一批開始。

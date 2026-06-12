@@ -76,7 +76,7 @@ export class MappingPage {
     }
     // 頂部工具列切換連線時重載資料表
     effect(() => {
-      const connId = this.ws.activeConnId();
+      const connId = this.ws.targetConnId();
       untracked(() => void this.loadTables(connId));
     });
   }
@@ -110,7 +110,7 @@ export class MappingPage {
 
   async onTableChange(): Promise<void> {
     this.targetColumns.set([]);
-    const connId = this.ws.activeConnId();
+    const connId = this.ws.targetConnId();
     if (!connId || !this.table) {
       return;
     }
@@ -164,13 +164,66 @@ export class MappingPage {
   }
 
   canProceed(): boolean {
-    return !!this.ws.activeConnId() && !!this.table && this.mappedCount() > 0;
+    return !!this.ws.targetConnId() && !!this.table && this.mappedCount() > 0;
+  }
+
+  /** 將目前的對應設定轉為 .etl 腳本並開啟編輯器（UI ↔ 腳本閉環）。 */
+  toScript(): void {
+    const text = this.generateScript();
+    if (!text) {
+      return;
+    }
+    this.state.scriptText.set(text);
+    this.log.info("對應", "已轉為 ETL 腳本");
+    this.router.navigate(["/script"]);
+  }
+
+  private generateScript(): string | null {
+    const sourcePath = this.state.sourcePath();
+    const target = this.ws.targetConnection();
+    if (!sourcePath || !target || !this.canProceed()) {
+      return null;
+    }
+    const esc = (s: string) => s.replace(/'/g, "''");
+    const rules = this.rows().filter((r) => r.targetColumn);
+    const ext = (sourcePath.split(".").pop() ?? "CSV").toUpperCase();
+    const sheet = this.state.sheet();
+    const encoding = this.state.encoding();
+
+    const fileArgs = [
+      `TYPE=${ext}`,
+      `PATH='${esc(sourcePath)}'`,
+      ...(sheet ? [`SHEET='${esc(sheet)}'`] : []),
+      ...(encoding ? [`ENCODING='${esc(encoding)}'`] : []),
+      `HEADER=${this.state.hasHeader() ? "TRUE" : "FALSE"}`,
+    ];
+    const tableRef = this.table
+      .split(".")
+      .map((p) => `[${p}]`)
+      .join(".");
+    const assigns = rules.map(
+      (r, i) => `${i === 0 ? " " : ","}[${r.targetColumn}] = [SOURCE].[${r.sourceName}]`,
+    );
+
+    return [
+      `-- 由「欄位對應」產生（${new Date().toLocaleString("zh-TW")}）`,
+      "-- 型別轉換依目標表結構自動推導；密碼不在腳本中（以連線名稱引用）",
+      `SOURCE = FILE(${fileArgs.join(", ")})`,
+      `TARGET = CONNECTION('${esc(target.name)}')`,
+      "",
+      `${tableRef} ADD`,
+      "{",
+      ...assigns,
+      "}",
+      "GO",
+      "",
+    ].join("\n");
   }
 
   proceed(): void {
     const preview = this.state.preview();
     const sourcePath = this.state.sourcePath();
-    const connId = this.ws.activeConnId();
+    const connId = this.ws.targetConnId();
     if (!preview || !sourcePath || !connId || !this.canProceed()) {
       return;
     }

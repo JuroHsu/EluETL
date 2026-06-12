@@ -19,6 +19,9 @@ fn sqlite_config(path: &str) -> ConnectionConfig {
         database: path.to_string(),
         username: String::new(),
         trust_server_certificate: false,
+        sheet: None,
+        encoding: None,
+        has_header: None,
     }
 }
 
@@ -39,7 +42,7 @@ async fn sqlite_end_to_end_import_and_export_query() {
     std::fs::File::create(&db_path).unwrap(); // 空檔即合法 SQLite DB
 
     let config = sqlite_config(db_path.to_str().unwrap());
-    let driver = db::create_driver(&config, &SecretString::new(String::new()));
+    let driver = db::create_driver(&config, &SecretString::new(String::new())).unwrap();
 
     driver.test_connection().await.unwrap();
     driver
@@ -144,7 +147,8 @@ async fn sqlite_rejects_dangerous_table_name() {
     let driver = db::create_driver(
         &sqlite_config(db_path.to_str().unwrap()),
         &SecretString::new(String::new()),
-    );
+    )
+    .unwrap();
 
     let err = driver
         .write_batch(

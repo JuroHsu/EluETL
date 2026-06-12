@@ -85,6 +85,23 @@ impl StateStore {
             .collect()
     }
 
+    /// 以名稱查找連線（.etl 腳本的 CONNECTION('名稱') 引用；不分大小寫、忽略前後空白）。
+    pub async fn get_connection_by_name(
+        &self,
+        name: &str,
+    ) -> Result<ConnectionConfig, EluEtlError> {
+        let target = name.trim();
+        self.list_connections()
+            .await?
+            .into_iter()
+            .find(|c| c.name.trim().eq_ignore_ascii_case(target) || c.name.trim() == target)
+            .ok_or_else(|| {
+                EluEtlError::NotFound(format!(
+                    "找不到名為「{name}」的已儲存連線（請先在「資料庫連線」建立並儲存）"
+                ))
+            })
+    }
+
     pub async fn get_connection(&self, id: &Uuid) -> Result<ConnectionConfig, EluEtlError> {
         let row = sqlx::query("SELECT config_json FROM connections WHERE id = ?1")
             .bind(id.to_string())

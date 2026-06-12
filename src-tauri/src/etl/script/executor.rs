@@ -18,15 +18,20 @@ use crate::models::value::{CellValue, DataType};
 
 const ERROR_DETAIL_CAP: usize = 1_000;
 
-/// 腳本任務參數。
+/// 腳本任務參數（IPC 傳入）。來源與目標皆為選擇性：
+/// 腳本標頭（SOURCE/TARGET）優先，否則回退到此處的工作區選擇。
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScriptJobParams {
     pub job_id: Uuid,
-    pub conn_id: Uuid,
-    pub source_path: String,
-    pub sheet: String,
-    pub has_header: bool,
+    #[serde(default)]
+    pub conn_id: Option<Uuid>,
+    #[serde(default)]
+    pub source_path: Option<String>,
+    #[serde(default)]
+    pub sheet: Option<String>,
+    #[serde(default)]
+    pub has_header: Option<bool>,
     #[serde(default)]
     pub encoding: Option<String>,
     #[serde(default = "default_batch_size")]
@@ -36,6 +41,17 @@ pub struct ScriptJobParams {
 
 fn default_batch_size() -> usize {
     5_000
+}
+
+/// 標頭 / 工作區解析完成後的具體任務（executor 的輸入）。
+#[derive(Debug, Clone)]
+pub struct ResolvedScriptJob {
+    pub job_id: Uuid,
+    pub source_path: String,
+    pub sheet: String,
+    pub has_header: bool,
+    pub encoding: Option<String>,
+    pub batch_size: usize,
 }
 
 /// 指派值的繫結結果（執行前解析一次，行迴圈內零查找成本）。
@@ -95,7 +111,7 @@ pub fn run_blocking_parse(script_text: &str) -> Result<Script, EluEtlError> {
 pub async fn run<F>(
     driver: Arc<dyn DbDriver>,
     dialect: Dialect,
-    params: ScriptJobParams,
+    job: ResolvedScriptJob,
     script: Script,
     emit: F,
     cancel: CancellationToken,
@@ -106,19 +122,19 @@ where
     let started = Instant::now();
 
     // 讀取來源
-    emit(progress(&params, "read", 0, 0, 0, 0));
+    emit(progress(&job, "read", 0, 0, 0, 0));
     let mut rows = {
         let (path, sheet, encoding) = (
-            params.source_path.clone(),
-            params.sheet.clone(),
-            params.encoding.clone(),
+            job.source_path.clone(),
+            job.sheet.clone(),
+            job.encoding.clone(),
         );
         tokio::task::spawn_blocking(move || source::read_rows(&path, &sheet, encoding.as_deref()))
             .await??
     };
 
     // 表頭 → 欄名索引（不分大小寫）
-    let header: Vec<String> = if params.has_header && !rows.is_empty() {
+    let header: Vec<String> = if job.has_header && !rows.is_empty() {
         rows.remove(0)
             .iter()
             .enumerate()
@@ -138,8 +154,8 @@ where
         .collect();
 
     let total_rows = rows.len() as u64;
-    let first_data_row = if params.has_header { 2 } else { 1 };
-    let batch_size = params.batch_size.max(1);
+    let first_data_row = if job.has_header { 2 } else { 1 };
+    let batch_size = job.batch_size.max(1);
     let total_batches = rows.len().div_ceil(batch_size).max(1) * script.statements.len();
 
     let mut success_rows: u64 = 0;
@@ -150,7 +166,7 @@ where
     for stmt in &script.statements {
         if cancel.is_cancelled() {
             return Ok(summary(
-                &params,
+                &job,
                 "cancelled",
                 total_rows,
                 success_rows,
@@ -220,7 +236,7 @@ where
             None => None,
             Some(cond) => {
                 emit(progress(
-                    &params,
+                    &job,
                     "lookup",
                     done_batches,
                     total_batches,
@@ -317,7 +333,7 @@ where
 
         // ---- 行迴圈：比對 + 組裝 + 型別轉換 ----
         emit(progress(
-            &params,
+            &job,
             "transform",
             done_batches,
             total_batches,
@@ -378,7 +394,7 @@ where
         for chunk in out_rows.chunks(batch_size) {
             if cancel.is_cancelled() {
                 return Ok(summary(
-                    &params,
+                    &job,
                     "cancelled",
                     total_rows,
                     success_rows,
@@ -389,7 +405,7 @@ where
                 ));
             }
             emit(progress(
-                &params,
+                &job,
                 "load",
                 done_batches,
                 total_batches,
@@ -400,7 +416,7 @@ where
                 Ok(n) => success_rows += n,
                 Err(e) => {
                     return Ok(summary(
-                        &params,
+                        &job,
                         "failed",
                         total_rows,
                         success_rows,
@@ -413,7 +429,7 @@ where
             }
             done_batches += 1;
             emit(progress(
-                &params,
+                &job,
                 "load",
                 done_batches,
                 total_batches,
@@ -425,7 +441,7 @@ where
         if out_rows.is_empty() {
             done_batches += rows.len().div_ceil(batch_size).max(1);
             emit(progress(
-                &params,
+                &job,
                 "load",
                 done_batches.min(total_batches),
                 total_batches,
@@ -436,7 +452,7 @@ where
 
         tracing::info!(
             target: "audit",
-            job_id = %params.job_id,
+            job_id = %job.job_id,
             statement_line = stmt.line,
             table = %target,
             inserted = out_rows.len(),
@@ -445,7 +461,7 @@ where
     }
 
     Ok(summary(
-        &params,
+        &job,
         "completed",
         total_rows,
         success_rows,
@@ -467,7 +483,7 @@ fn push_error(errors: &mut Vec<RowError>, row: usize, column: &str, reason: Stri
 }
 
 fn progress(
-    params: &ScriptJobParams,
+    job: &ResolvedScriptJob,
     phase: &str,
     batch: usize,
     total_batches: usize,
@@ -475,7 +491,7 @@ fn progress(
     error_rows: u64,
 ) -> EtlProgress {
     EtlProgress {
-        job_id: params.job_id,
+        job_id: job.job_id,
         phase: phase.to_string(),
         batch,
         total_batches,
@@ -486,7 +502,7 @@ fn progress(
 
 #[allow(clippy::too_many_arguments)]
 fn summary(
-    params: &ScriptJobParams,
+    job: &ResolvedScriptJob,
     status: &str,
     total_rows: u64,
     success_rows: u64,
@@ -496,7 +512,7 @@ fn summary(
     errors: Vec<RowError>,
 ) -> EtlSummary {
     EtlSummary {
-        job_id: params.job_id,
+        job_id: job.job_id,
         status: status.to_string(),
         total_rows,
         success_rows,

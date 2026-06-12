@@ -2,17 +2,18 @@
   <!-- 工具列 -->
   <div class="flex h-10 shrink-0 items-center gap-3 border-b border-vs-border px-3">
     <span class="vs-section">ETL 腳本</span>
+    <span class="text-xs text-vs-text">{{ etlFileName() }}</span>
+
+    <button type="button" (click)="openFile()" class="vs-btn-secondary h-6">開啟…</button>
+    <button type="button" (click)="saveFile()" class="vs-btn-secondary h-6">儲存</button>
 
     <span class="text-[11px] text-vs-muted">
       @if (state.sourcePath()) {
-        來源：{{ fileName() }}（{{ state.sheet() }}）
+        工作區來源：{{ fileName() }}（{{ state.sheet() }}）
       } @else {
-        尚未載入來源檔 — 請先到「匯入資料」選擇檔案
+        無工作區來源 — 腳本需含 SOURCE = FILE(...) 或 CONNECTION(...)
       }
     </span>
-    @if (!ws.activeConnId()) {
-      <span class="text-[11px] text-vs-warn">請於上方工具列選擇連線</span>
-    }
 
     <div class="ml-auto flex items-center gap-2">
       <button type="button" (click)="insertSample()" class="vs-btn-secondary h-6">插入範例</button>

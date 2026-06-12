@@ -10,15 +10,21 @@ use crate::models::schema::{ColumnInfo, TableInfo};
 use crate::security::{keychain, secrets::SecretString};
 
 /// 測試連線（不儲存）。成功後驅動實例（含池）以 ConnectionId 快取供後續重用。
+/// 檔案連線測試 = 檔案存在且可解析（列得出工作表）。
 #[tauri::command]
 pub async fn test_connection(
     state: tauri::State<'_, AppState>,
     config: ConnectionConfig,
     password: SecretString,
 ) -> Result<(), EluEtlError> {
-    let driver = db::create_driver(&config, &password);
-    driver.test_connection().await?;
-    state.insert_driver(config.id, driver).await;
+    if config.kind == DbKind::File {
+        let path = config.database.clone();
+        tokio::task::spawn_blocking(move || crate::excel::source::list_sheets(&path)).await??;
+    } else {
+        let driver = db::create_driver(&config, &password)?;
+        driver.test_connection().await?;
+        state.insert_driver(config.id, driver).await;
+    }
     tracing::info!(
         target: "audit",
         conn_id = %config.id,
@@ -37,7 +43,10 @@ pub async fn save_connection(
 ) -> Result<(), EluEtlError> {
     state.store()?.upsert_connection(&config).await?;
     if let Some(pw) = password {
-        if config.kind != DbKind::Sqlite {
+        if matches!(
+            config.kind,
+            DbKind::SqlServer | DbKind::Postgres | DbKind::MySql
+        ) {
             let id = config.id;
             tokio::task::spawn_blocking(move || keychain::save_password(&id, &pw)).await??;
         }
@@ -73,6 +82,12 @@ pub async fn ping_connection(
     state: tauri::State<'_, AppState>,
     conn_id: Uuid,
 ) -> Result<(), EluEtlError> {
+    let config = state.store()?.get_connection(&conn_id).await?;
+    if config.kind == DbKind::File {
+        let path = config.database;
+        tokio::task::spawn_blocking(move || crate::excel::source::list_sheets(&path)).await??;
+        return Ok(());
+    }
     state
         .get_or_create_driver(conn_id)
         .await?

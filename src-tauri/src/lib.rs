@@ -55,6 +55,8 @@ pub fn run() {
             commands::etl::resume_etl,
             commands::etl::validate_etl_script,
             commands::etl::execute_etl_script,
+            commands::etl::load_etl_file,
+            commands::etl::save_etl_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
