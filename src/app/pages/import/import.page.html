@@ -1,0 +1,131 @@
+<div class="mx-auto max-w-5xl">
+  <h1 class="mb-6 text-2xl font-semibold text-slate-800">匯入資料</h1>
+
+  <div class="space-y-4 rounded-lg bg-white p-6 shadow">
+    <div class="flex items-center gap-4">
+      <button
+        type="button"
+        (click)="pickFile()"
+        class="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+      >
+        選擇檔案…
+      </button>
+      @if (state.sourcePath()) {
+        <span class="text-sm text-slate-700">{{ fileName() }}</span>
+      } @else {
+        <span class="text-sm text-slate-400">支援 xlsx / xls / xlsb / ods / csv / tsv</span>
+      }
+    </div>
+
+    @if (state.sourcePath()) {
+      <div class="flex flex-wrap items-center gap-6 border-t border-slate-100 pt-4">
+        @if (state.sheets().length > 1) {
+          <label class="flex items-center gap-2 text-sm text-slate-700">
+            工作表
+            <select
+              [ngModel]="state.sheet()"
+              (ngModelChange)="onSheetChange($event)"
+              class="rounded border border-slate-300 px-2 py-1 text-sm"
+            >
+              @for (s of state.sheets(); track s) {
+                <option [value]="s">{{ s }}</option>
+              }
+            </select>
+          </label>
+        }
+
+        <label class="flex items-center gap-2 text-sm text-slate-700">
+          <input
+            type="checkbox"
+            [ngModel]="state.hasHeader()"
+            (ngModelChange)="onHeaderChange($event)"
+            class="rounded"
+          />
+          第一列為欄位名稱
+        </label>
+
+        @if (isCsv) {
+          <label class="flex items-center gap-2 text-sm text-slate-700">
+            編碼
+            <select
+              [ngModel]="state.encoding()"
+              (ngModelChange)="onEncodingChange($event)"
+              class="rounded border border-slate-300 px-2 py-1 text-sm"
+            >
+              @for (e of encodings; track e.label) {
+                <option [ngValue]="e.value">{{ e.label }}</option>
+              }
+            </select>
+            @if (state.preview()?.encoding; as enc) {
+              <span class="text-xs text-slate-400">偵測：{{ enc }}</span>
+            }
+          </label>
+        }
+      </div>
+    }
+
+    @if (loading()) {
+      <p class="text-sm text-slate-500">讀取中…</p>
+    }
+    @if (error(); as err) {
+      <p class="text-sm text-red-600">{{ err }}</p>
+    }
+  </div>
+
+  @if (state.preview(); as p) {
+    <div class="mt-6 rounded-lg bg-white p-6 shadow">
+      <div class="mb-3 flex items-center justify-between">
+        <h2 class="text-sm font-medium text-slate-600">
+          預覽（前 {{ p.rows.length }} 行，共 {{ p.totalRows.toLocaleString() }} 行）
+        </h2>
+        <button
+          type="button"
+          (click)="next()"
+          class="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+        >
+          下一步：欄位對應 →
+        </button>
+      </div>
+
+      @if (p.totalRows > largeFileRows) {
+        <p class="mb-3 rounded bg-amber-50 px-3 py-2 text-xs text-amber-700">
+          ⚠ 檔案超過 {{ largeFileRows.toLocaleString() }} 行：解析會將整個工作表載入記憶體，請確認本機記憶體足夠。
+        </p>
+      }
+
+      <div class="max-h-96 overflow-auto rounded border border-slate-200">
+        <table class="min-w-full text-xs">
+          <thead class="sticky top-0 bg-slate-50">
+            <tr>
+              @for (col of p.columns; track col.index) {
+                <th class="border-b border-slate-200 px-3 py-2 text-left font-medium text-slate-700">
+                  {{ col.name }}
+                  <span
+                    class="ml-1 rounded px-1 text-[10px]"
+                    [class.bg-blue-100]="col.inferredType"
+                    [class.text-blue-700]="col.inferredType"
+                    [class.bg-amber-100]="!col.inferredType"
+                    [class.text-amber-700]="!col.inferredType"
+                  >
+                    {{ typeLabel(col.inferredType) }}
+                  </span>
+                </th>
+              }
+            </tr>
+          </thead>
+          <tbody>
+            @for (row of p.rows.slice(0, 50); track $index) {
+              <tr class="odd:bg-white even:bg-slate-50">
+                @for (cell of row; track $index) {
+                  <td class="whitespace-nowrap border-b border-slate-100 px-3 py-1.5 text-slate-600">
+                    {{ cell === null ? "" : cell }}
+                  </td>
+                }
+              </tr>
+            }
+          </tbody>
+        </table>
+      </div>
+    </div>
+  }
+</div>

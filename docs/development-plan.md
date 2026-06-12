@@ -586,11 +586,18 @@ pub fn transform_batch(rows: &[ExcelRow], rules: &[MappingRule]) -> (Vec<DbRow>,
 
 | Phase | 時程 | 主要產出 | 狀態 |
 |---|---|---|---|
-| Phase 0 — 環境 + 憑證申請 | 第 1 週 | 骨架、CI gate、**簽署憑證送件** | ⬜ 待開始 |
-| Phase 1 — Rust 核心 | 第 2–4 週 | DB（sqlx+tiberius）/ Excel / ETL 引擎 + 單元/整合測試 | ⬜ 待開始 |
-| Phase 2 — Angular 前端 | 第 5–6 週 | 完整 UI 流程（連線→Mapping→執行→續跑） | ⬜ 待開始 |
+| Phase 0 — 環境 + 憑證申請 | 第 1 週 | 骨架、CI gate、**簽署憑證送件** | ✅ 完成（2026-06-12；憑證申請待辦） |
+| Phase 1 — Rust 核心 | 第 2–4 週 | DB（sqlx+tiberius）/ Excel / ETL 引擎 + 單元/整合測試 | ✅ 完成（2026-06-12；備註 ¹） |
+| Phase 2 — Angular 前端 | 第 5–6 週 | 完整 UI 流程（連線→匯入→Mapping→執行→續跑） | ✅ 完成（2026-06-12；備註 ²） |
 | Phase 3 — 整合測試打包 | 第 7–8 週 | 三平台簽署安裝包、效能達標、自動更新 | ⬜ 待開始 |
 | Phase 4 — 商業化 | 第 9–10 週 | License 機制、Sentry、文件、發佈演練 | ⬜ 待開始 |
+
+> **備註 ¹（Phase 1 實作差異）**：批次寫入目前四種 DB 均採「多列參數化 INSERT + 交易」（已依各 DB 參數上限自動分批）；
+> TDS Bulk Load / PG COPY 原生協定列入效能優化 backlog。testcontainers 整合測試（MSSQL/PG/MySQL）待補，
+> 現有整合測試以 SQLite 覆蓋完整匯入管線。Staging 合併寫入模式（P1）未實作。
+>
+> **備註 ²（Phase 2 實作差異）**：預覽表格以自製元件實作（未用 AG Grid）；UI i18n（zh-Hant/en）與
+> Mapping 範本儲存載入待補。查詢結果匯出 xlsx 的後端 command 已完成，前端入口頁待補。
 
 **總計：10 週（約 2.5 個月），1 位全端開發者獨立完成 MVP。**
 時程已含測試與打包的實際工作量；若簽署憑證核發延遲（不可控），Phase 3 簽署項目可後移至 Phase 4，不阻塞其餘工作。

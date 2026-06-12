@@ -16,6 +16,18 @@ pub enum EluEtlError {
     #[error("找不到資源: {0}")]
     NotFound(String),
 
+    #[error("檔案解析錯誤: {0}")]
+    Excel(String),
+
+    #[error("ETL 錯誤: {0}")]
+    Etl(String),
+
+    #[error("機密儲存錯誤: {0}")]
+    Secret(String),
+
+    #[error("操作已取消")]
+    Cancelled,
+
     #[error("尚未實作: {0}")]
     NotImplemented(&'static str),
 }
@@ -28,8 +40,48 @@ impl EluEtlError {
             EluEtlError::Io(_) => "IO_ERROR",
             EluEtlError::Config(_) => "CONFIG_ERROR",
             EluEtlError::NotFound(_) => "NOT_FOUND",
+            EluEtlError::Excel(_) => "FILE_ERROR",
+            EluEtlError::Etl(_) => "ETL_ERROR",
+            EluEtlError::Secret(_) => "SECRET_ERROR",
+            EluEtlError::Cancelled => "CANCELLED",
             EluEtlError::NotImplemented(_) => "NOT_IMPLEMENTED",
         }
+    }
+}
+
+impl From<calamine::Error> for EluEtlError {
+    fn from(e: calamine::Error) -> Self {
+        EluEtlError::Excel(e.to_string())
+    }
+}
+
+impl From<rust_xlsxwriter::XlsxError> for EluEtlError {
+    fn from(e: rust_xlsxwriter::XlsxError) -> Self {
+        EluEtlError::Excel(e.to_string())
+    }
+}
+
+impl From<csv::Error> for EluEtlError {
+    fn from(e: csv::Error) -> Self {
+        EluEtlError::Excel(e.to_string())
+    }
+}
+
+impl From<keyring_core::Error> for EluEtlError {
+    fn from(e: keyring_core::Error) -> Self {
+        EluEtlError::Secret(e.to_string())
+    }
+}
+
+impl From<serde_json::Error> for EluEtlError {
+    fn from(e: serde_json::Error) -> Self {
+        EluEtlError::Config(e.to_string())
+    }
+}
+
+impl From<tokio::task::JoinError> for EluEtlError {
+    fn from(e: tokio::task::JoinError) -> Self {
+        EluEtlError::Etl(format!("背景工作失敗: {e}"))
     }
 }
 
