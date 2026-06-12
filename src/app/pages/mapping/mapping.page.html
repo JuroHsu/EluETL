@@ -1,34 +1,16 @@
-<div class="mx-auto max-w-5xl">
-  <h1 class="mb-6 text-2xl font-semibold text-slate-800">欄位對應</h1>
+<div class="flex h-full flex-col">
+  <!-- 工具列 -->
+  <div class="flex h-10 shrink-0 items-center gap-4 border-b border-vs-border px-3">
+    <span class="vs-section">欄位對應</span>
 
-  @if (!hasSource) {
-    <p class="rounded-lg border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-500">
-      尚未選擇來源檔，請先到「匯入資料」選擇 Excel / CSV 檔案。
-    </p>
-  } @else {
-    <!-- 目標選擇 -->
-    <div class="mb-6 flex flex-wrap items-end gap-6 rounded-lg bg-white p-6 shadow">
-      <label class="block text-sm text-slate-700">
-        <span class="mb-1 block font-medium">目標連線</span>
-        <select
-          [(ngModel)]="connId"
-          (ngModelChange)="onConnChange()"
-          class="min-w-48 rounded border border-slate-300 px-3 py-2 text-sm"
-        >
-          <option value="" disabled>選擇連線…</option>
-          @for (c of connections(); track c.id) {
-            <option [value]="c.id">{{ c.name }}</option>
-          }
-        </select>
-      </label>
-
-      <label class="block text-sm text-slate-700">
-        <span class="mb-1 block font-medium">目標資料表</span>
+    @if (hasSource) {
+      <label class="flex items-center gap-1.5 text-[11px] text-vs-muted">
+        目標資料表
         <select
           [(ngModel)]="table"
           (ngModelChange)="onTableChange()"
           [disabled]="!tables().length"
-          class="min-w-48 rounded border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-100"
+          class="vs-input h-6 min-w-44 text-xs"
         >
           <option value="" disabled>選擇資料表…</option>
           @for (t of tables(); track tableKey(t)) {
@@ -37,113 +19,126 @@
         </select>
       </label>
 
+      @if (targetColumns().length) {
+        <span class="text-[11px] text-vs-muted">已對應 {{ mappedCount() }}/{{ rows().length }} 欄</span>
+      }
       @if (loading()) {
-        <span class="pb-2 text-sm text-slate-500">載入中…</span>
+        <span class="text-[11px] text-vs-muted">載入中…</span>
       }
-      @if (error(); as err) {
-        <span class="pb-2 text-sm text-red-600">{{ err }}</span>
+      @if (!ws.activeConnId()) {
+        <span class="text-[11px] text-vs-warn">請先於上方工具列選擇連線</span>
       }
-      @if (connections().length === 0) {
-        <span class="pb-2 text-sm text-amber-600">尚無儲存的連線，請先到「資料庫連線」建立並儲存。</span>
+
+      @if (targetColumns().length) {
+        <button type="button" (click)="proceed()" [disabled]="!canProceed()" class="vs-btn ml-auto h-6">
+          下一步：執行 →
+        </button>
       }
+    }
+  </div>
+
+  @if (error(); as err) {
+    <p class="border-b border-vs-border px-3 py-1.5 text-xs text-vs-error">{{ err }}</p>
+  }
+
+  @if (!hasSource) {
+    <div class="flex flex-1 items-center justify-center">
+      <p class="text-sm text-vs-muted">尚未選擇來源檔，請先到「匯入資料」選擇 Excel / CSV。</p>
+    </div>
+  } @else if (targetColumns().length) {
+    <!-- 對應表 -->
+    <div class="min-h-0 flex-1 overflow-auto">
+      <table class="vs-table">
+        <thead>
+          <tr>
+            <th>來源欄位</th>
+            <th>推斷型別</th>
+            <th>目標欄位</th>
+            <th>轉換型別</th>
+            <th>NULL</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (row of rows(); track row.sourceIndex) {
+            <tr>
+              <td class="whitespace-nowrap">{{ row.sourceName }}</td>
+              <td class="text-[11px] text-vs-muted">{{ row.inferredType ?? "未定" }}</td>
+              <td>
+                <select
+                  [(ngModel)]="row.targetColumn"
+                  (ngModelChange)="onTargetPicked(row)"
+                  class="vs-input h-6 w-48 text-xs"
+                >
+                  <option value="">— 略過 —</option>
+                  @for (c of targetColumns(); track c.name) {
+                    <option [value]="c.name">{{ c.name }}（{{ c.dbType }}）</option>
+                  }
+                </select>
+              </td>
+              <td>
+                <select
+                  [(ngModel)]="row.targetType"
+                  [disabled]="!row.targetColumn"
+                  class="vs-input h-6 w-28 text-xs"
+                >
+                  @for (t of dataTypes; track t.value) {
+                    <option [value]="t.value">{{ t.label }}</option>
+                  }
+                </select>
+              </td>
+              <td>
+                <label class="flex items-center gap-1 text-[11px] text-vs-muted">
+                  <input
+                    type="checkbox"
+                    [(ngModel)]="row.allowNull"
+                    [disabled]="!row.targetColumn"
+                    class="accent-vs-accent"
+                  />
+                  允許
+                </label>
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
     </div>
 
-    <!-- 對應表 -->
-    @if (targetColumns().length) {
-      <div class="rounded-lg bg-white p-6 shadow">
-        <h2 class="mb-3 text-sm font-medium text-slate-600">
-          來源欄位 → {{ table }}（已對應 {{ mappedCount() }} / {{ rows().length }} 欄）
-        </h2>
-        <table class="min-w-full text-sm">
-          <thead>
-            <tr class="border-b border-slate-200 text-left text-xs text-slate-500">
-              <th class="px-3 py-2">來源欄位</th>
-              <th class="px-3 py-2">推斷型別</th>
-              <th class="px-3 py-2">目標欄位</th>
-              <th class="px-3 py-2">轉換型別</th>
-              <th class="px-3 py-2">NULL</th>
-            </tr>
-          </thead>
-          <tbody>
-            @for (row of rows(); track row.sourceIndex) {
-              <tr class="border-b border-slate-100">
-                <td class="px-3 py-2 font-medium text-slate-800">{{ row.sourceName }}</td>
-                <td class="px-3 py-2 text-xs text-slate-500">{{ row.inferredType ?? "未定" }}</td>
-                <td class="px-3 py-2">
-                  <select
-                    [(ngModel)]="row.targetColumn"
-                    (ngModelChange)="onTargetPicked(row)"
-                    class="w-44 rounded border border-slate-300 px-2 py-1 text-sm"
-                  >
-                    <option value="">— 略過 —</option>
-                    @for (c of targetColumns(); track c.name) {
-                      <option [value]="c.name">{{ c.name }}（{{ c.dbType }}）</option>
-                    }
-                  </select>
-                </td>
-                <td class="px-3 py-2">
-                  <select
-                    [(ngModel)]="row.targetType"
-                    [disabled]="!row.targetColumn"
-                    class="rounded border border-slate-300 px-2 py-1 text-sm disabled:bg-slate-100"
-                  >
-                    @for (t of dataTypes; track t.value) {
-                      <option [value]="t.value">{{ t.label }}</option>
-                    }
-                  </select>
-                </td>
-                <td class="px-3 py-2">
-                  <label class="flex items-center gap-1 text-xs text-slate-600">
-                    <input type="checkbox" [(ngModel)]="row.allowNull" [disabled]="!row.targetColumn" class="rounded" />
-                    允許
-                  </label>
-                </td>
-              </tr>
-            }
-          </tbody>
-        </table>
+    <!-- 執行選項 -->
+    <div class="flex shrink-0 flex-wrap items-center gap-5 border-t border-vs-border px-3 py-2">
+      <label class="flex items-center gap-1.5 text-[11px] text-vs-muted">
+        寫入模式
+        <select [(ngModel)]="writeMode" class="vs-input h-6 text-xs">
+          <option value="batchCommit">批次提交（可續跑）</option>
+          <option value="allOrNothing">全有全無（單一交易）</option>
+        </select>
+      </label>
 
-        <!-- 執行選項 -->
-        <div class="mt-6 flex flex-wrap items-end gap-6 border-t border-slate-100 pt-4">
-          <label class="block text-sm text-slate-700">
-            <span class="mb-1 block font-medium">寫入模式</span>
-            <select [(ngModel)]="writeMode" class="rounded border border-slate-300 px-3 py-2 text-sm">
-              <option value="batchCommit">批次提交（可續跑）</option>
-              <option value="allOrNothing">全有全無（單一交易）</option>
-            </select>
-          </label>
+      <label class="flex items-center gap-1.5 text-[11px] text-vs-muted">
+        錯誤政策
+        <select [(ngModel)]="errorPolicy" class="vs-input h-6 text-xs">
+          <option value="skipAndReport">跳過並記錄</option>
+          <option value="abortOnFirst">首錯即停</option>
+          <option value="abortOnErrorRate">錯誤率閾值</option>
+        </select>
+      </label>
 
-          <label class="block text-sm text-slate-700">
-            <span class="mb-1 block font-medium">錯誤政策</span>
-            <select [(ngModel)]="errorPolicy" class="rounded border border-slate-300 px-3 py-2 text-sm">
-              <option value="skipAndReport">跳過並記錄</option>
-              <option value="abortOnFirst">首錯即停</option>
-              <option value="abortOnErrorRate">錯誤率閾值</option>
-            </select>
-          </label>
+      @if (errorPolicy === "abortOnErrorRate") {
+        <label class="flex items-center gap-1.5 text-[11px] text-vs-muted">
+          上限 %
+          <input type="number" [(ngModel)]="maxErrorPercent" min="0" max="100" class="vs-input h-6 w-16 text-xs" />
+        </label>
+      }
 
-          @if (errorPolicy === "abortOnErrorRate") {
-            <label class="block text-sm text-slate-700">
-              <span class="mb-1 block font-medium">錯誤率上限（%）</span>
-              <input type="number" [(ngModel)]="maxErrorPercent" min="0" max="100" class="w-24 rounded border border-slate-300 px-3 py-2 text-sm" />
-            </label>
-          }
-
-          <label class="block text-sm text-slate-700">
-            <span class="mb-1 block font-medium">批次大小</span>
-            <input type="number" [(ngModel)]="batchSize" min="100" max="50000" step="100" class="w-28 rounded border border-slate-300 px-3 py-2 text-sm" />
-          </label>
-
-          <button
-            type="button"
-            (click)="proceed()"
-            [disabled]="!canProceed()"
-            class="ml-auto rounded bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-          >
-            下一步：執行 →
-          </button>
-        </div>
-      </div>
-    }
+      <label class="flex items-center gap-1.5 text-[11px] text-vs-muted">
+        批次大小
+        <input type="number" [(ngModel)]="batchSize" min="100" max="50000" step="100" class="vs-input h-6 w-20 text-xs" />
+      </label>
+    </div>
+  } @else {
+    <div class="flex flex-1 items-center justify-center">
+      <p class="text-sm text-vs-muted">
+        {{ ws.activeConnId() ? "選擇目標資料表後開始對應" : "請先於上方工具列選擇使用中連線" }}
+      </p>
+    </div>
   }
 </div>

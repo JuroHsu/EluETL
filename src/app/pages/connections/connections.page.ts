@@ -6,12 +6,14 @@ import {
   Validators,
 } from "@angular/forms";
 
+import { LogService } from "../../services/log.service";
 import {
   ConnectionConfig,
   DbKind,
   TauriService,
   errorMessage,
 } from "../../services/tauri.service";
+import { WorkspaceService } from "../../services/workspace.service";
 
 @Component({
   selector: "app-connections",
@@ -20,8 +22,9 @@ import {
 })
 export class ConnectionsPage implements OnInit {
   private readonly tauri = inject(TauriService);
+  private readonly log = inject(LogService);
+  readonly ws = inject(WorkspaceService);
 
-  readonly connections = signal<ConnectionConfig[]>([]);
   readonly busy = signal(false);
   readonly result = signal<{ ok: boolean; message: string } | null>(null);
   /** 編輯中的既有連線 id（null = 新增） */
@@ -39,7 +42,11 @@ export class ConnectionsPage implements OnInit {
   });
 
   async ngOnInit(): Promise<void> {
-    await this.reload();
+    try {
+      await this.ws.reload();
+    } catch (e) {
+      this.result.set({ ok: false, message: errorMessage(e) });
+    }
   }
 
   get kind(): DbKind {
@@ -52,14 +59,6 @@ export class ConnectionsPage implements OnInit {
 
   get isSqlServer(): boolean {
     return this.kind === "sqlserver";
-  }
-
-  async reload(): Promise<void> {
-    try {
-      this.connections.set(await this.tauri.listConnections());
-    } catch (e) {
-      this.result.set({ ok: false, message: errorMessage(e) });
-    }
   }
 
   edit(conn: ConnectionConfig): void {
@@ -104,11 +103,14 @@ export class ConnectionsPage implements OnInit {
     }
     this.busy.set(true);
     this.result.set(null);
+    const config = this.buildConfig();
     try {
-      await this.tauri.testConnection(this.buildConfig(), this.form.controls.password.value);
+      await this.tauri.testConnection(config, this.form.controls.password.value);
       this.result.set({ ok: true, message: "連線成功" });
+      this.log.success("連線", `${config.name}：測試成功`);
     } catch (e) {
       this.result.set({ ok: false, message: errorMessage(e) });
+      this.log.error("連線", `${config.name}：${errorMessage(e)}`);
     } finally {
       this.busy.set(false);
     }
@@ -128,9 +130,14 @@ export class ConnectionsPage implements OnInit {
       await this.tauri.saveConnection(config, pw ? pw : null);
       this.editingId.set(config.id);
       this.result.set({ ok: true, message: "已儲存（密碼存於系統金鑰圈）" });
-      await this.reload();
+      this.log.info("連線", `${config.name}：已儲存`);
+      await this.ws.reload();
+      if (!this.ws.activeConnId()) {
+        this.ws.activeConnId.set(config.id);
+      }
     } catch (e) {
       this.result.set({ ok: false, message: errorMessage(e) });
+      this.log.error("連線", errorMessage(e));
     } finally {
       this.busy.set(false);
     }
@@ -142,10 +149,11 @@ export class ConnectionsPage implements OnInit {
     }
     try {
       await this.tauri.deleteConnection(conn.id);
+      this.log.info("連線", `${conn.name}：已刪除`);
       if (this.editingId() === conn.id) {
         this.newConnection();
       }
-      await this.reload();
+      await this.ws.reload();
     } catch (e) {
       this.result.set({ ok: false, message: errorMessage(e) });
     }

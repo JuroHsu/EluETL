@@ -4,6 +4,7 @@ import { Router } from "@angular/router";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import { EtlStateService } from "../../services/etl-state.service";
+import { LogService } from "../../services/log.service";
 import { TauriService, errorMessage } from "../../services/tauri.service";
 
 /** 顯示記憶體警示的行數閾值（開發計畫 §2.2.2：calamine 整檔載入）。 */
@@ -17,6 +18,7 @@ const LARGE_FILE_ROWS = 500_000;
 export class ImportPage {
   private readonly tauri = inject(TauriService);
   private readonly router = inject(Router);
+  private readonly log = inject(LogService);
   readonly state = inject(EtlStateService);
 
   readonly loading = signal(false);
@@ -60,8 +62,14 @@ export class ImportPage {
       this.state.sheets.set(sheets);
       this.state.sheet.set(sheets[0] ?? "");
       await this.loadPreview();
+      const p = this.state.preview();
+      this.log.info(
+        "匯入",
+        `已載入 ${this.fileName()}（${p?.totalRows.toLocaleString() ?? "?"} 行${p?.encoding ? "，編碼 " + p.encoding : ""}）`,
+      );
     } catch (e) {
       this.error.set(errorMessage(e));
+      this.log.error("匯入", errorMessage(e));
     } finally {
       this.loading.set(false);
     }
@@ -86,6 +94,7 @@ export class ImportPage {
     } catch (e) {
       this.error.set(errorMessage(e));
       this.state.preview.set(null);
+      this.log.error("匯入", errorMessage(e));
     } finally {
       this.loading.set(false);
     }

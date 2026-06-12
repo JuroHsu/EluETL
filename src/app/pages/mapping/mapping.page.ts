@@ -1,11 +1,11 @@
-import { Component, OnInit, inject, signal } from "@angular/core";
+import { Component, effect, inject, signal, untracked } from "@angular/core";
 import { FormsModule } from "@angular/forms";
 import { Router } from "@angular/router";
 
 import { EtlStateService } from "../../services/etl-state.service";
+import { LogService } from "../../services/log.service";
 import {
   ColumnInfo,
-  ConnectionConfig,
   DataType,
   ErrorPolicy,
   EtlJobConfig,
@@ -15,6 +15,7 @@ import {
   WriteMode,
   errorMessage,
 } from "../../services/tauri.service";
+import { WorkspaceService } from "../../services/workspace.service";
 
 /** 單一來源欄的對應編輯列。 */
 interface RuleRow {
@@ -31,19 +32,19 @@ interface RuleRow {
   imports: [FormsModule],
   templateUrl: "./mapping.page.html",
 })
-export class MappingPage implements OnInit {
+export class MappingPage {
   private readonly tauri = inject(TauriService);
   private readonly router = inject(Router);
+  private readonly log = inject(LogService);
+  readonly ws = inject(WorkspaceService);
   readonly state = inject(EtlStateService);
 
-  readonly connections = signal<ConnectionConfig[]>([]);
   readonly tables = signal<TableInfo[]>([]);
   readonly targetColumns = signal<ColumnInfo[]>([]);
   readonly rows = signal<RuleRow[]>([]);
   readonly error = signal<string | null>(null);
   readonly loading = signal(false);
 
-  connId = "";
   table = "";
   writeMode: "batchCommit" | "allOrNothing" = "batchCommit";
   errorPolicy: "skipAndReport" | "abortOnFirst" | "abortOnErrorRate" = "skipAndReport";
@@ -59,12 +60,7 @@ export class MappingPage implements OnInit {
     { value: "date", label: "日期" },
   ];
 
-  async ngOnInit(): Promise<void> {
-    try {
-      this.connections.set(await this.tauri.listConnections());
-    } catch (e) {
-      this.error.set(errorMessage(e));
-    }
+  constructor() {
     const preview = this.state.preview();
     if (preview) {
       this.rows.set(
@@ -78,25 +74,31 @@ export class MappingPage implements OnInit {
         })),
       );
     }
+    // 頂部工具列切換連線時重載資料表
+    effect(() => {
+      const connId = this.ws.activeConnId();
+      untracked(() => void this.loadTables(connId));
+    });
   }
 
   get hasSource(): boolean {
     return this.state.preview() !== null;
   }
 
-  async onConnChange(): Promise<void> {
+  private async loadTables(connId: string | null): Promise<void> {
     this.table = "";
     this.tables.set([]);
     this.targetColumns.set([]);
-    if (!this.connId) {
+    if (!connId) {
       return;
     }
     this.loading.set(true);
     this.error.set(null);
     try {
-      this.tables.set(await this.tauri.getTables(this.connId));
+      this.tables.set(await this.tauri.getTables(connId));
     } catch (e) {
       this.error.set(errorMessage(e));
+      this.log.error("對應", errorMessage(e));
     } finally {
       this.loading.set(false);
     }
@@ -108,17 +110,23 @@ export class MappingPage implements OnInit {
 
   async onTableChange(): Promise<void> {
     this.targetColumns.set([]);
-    if (!this.connId || !this.table) {
+    const connId = this.ws.activeConnId();
+    if (!connId || !this.table) {
       return;
     }
     this.loading.set(true);
     this.error.set(null);
     try {
-      const cols = await this.tauri.getColumns(this.connId, this.table);
+      const cols = await this.tauri.getColumns(connId, this.table);
       this.targetColumns.set(cols);
       this.autoMatch(cols);
+      this.log.info(
+        "對應",
+        `${this.table}：自動對應 ${this.mappedCount()}/${this.rows().length} 欄`,
+      );
     } catch (e) {
       this.error.set(errorMessage(e));
+      this.log.error("對應", errorMessage(e));
     } finally {
       this.loading.set(false);
     }
@@ -156,13 +164,14 @@ export class MappingPage implements OnInit {
   }
 
   canProceed(): boolean {
-    return !!this.connId && !!this.table && this.mappedCount() > 0;
+    return !!this.ws.activeConnId() && !!this.table && this.mappedCount() > 0;
   }
 
   proceed(): void {
     const preview = this.state.preview();
     const sourcePath = this.state.sourcePath();
-    if (!preview || !sourcePath || !this.canProceed()) {
+    const connId = this.ws.activeConnId();
+    if (!preview || !sourcePath || !connId || !this.canProceed()) {
       return;
     }
     const rules: MappingRule[] = this.rows()
@@ -183,7 +192,7 @@ export class MappingPage implements OnInit {
 
     const job: EtlJobConfig = {
       jobId: crypto.randomUUID(),
-      connId: this.connId,
+      connId,
       sourcePath,
       sheet: this.state.sheet(),
       hasHeader: this.state.hasHeader(),

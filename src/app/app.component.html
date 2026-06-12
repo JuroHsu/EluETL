@@ -1,40 +1,166 @@
-<div class="flex h-screen bg-slate-100">
-  <aside class="flex w-56 flex-col bg-slate-900 text-slate-100">
-    <div class="px-4 py-5 text-lg font-semibold tracking-wide">Elu ETL</div>
-    <nav class="flex-1 space-y-1 px-2">
+<div class="flex h-screen flex-col">
+  <!-- 頂部工具列：App 名稱 + 使用中連線選擇器 -->
+  <header
+    class="flex h-9 shrink-0 items-center gap-3 border-b border-vs-border bg-vs-topbar px-3"
+  >
+    <span class="text-xs font-semibold tracking-widest text-vs-muted">ELU ETL</span>
+
+    <div class="flex items-center gap-1.5">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="h-4 w-4 text-vs-muted">
+        <ellipse cx="12" cy="5" rx="7" ry="3" />
+        <path d="M5 5v14c0 1.66 3.13 3 7 3s7-1.34 7-3V5" />
+        <path d="M5 12c0 1.66 3.13 3 7 3s7-1.34 7-3" />
+      </svg>
+      <select
+        [ngModel]="ws.activeConnId()"
+        (ngModelChange)="ws.activeConnId.set($event)"
+        class="vs-input h-6 min-w-44 text-xs"
+        title="使用中連線"
+      >
+        <option [ngValue]="null">— 未選擇連線 —</option>
+        @for (c of ws.connections(); track c.id) {
+          <option [ngValue]="c.id">{{ c.name }}</option>
+        }
+      </select>
+    </div>
+
+    @if (ws.activeConnection(); as conn) {
+      <span class="text-[11px] text-vs-muted">
+        {{ conn.kind === "sqlite" ? conn.database : conn.host + " / " + conn.database }}
+      </span>
+    }
+  </header>
+
+  <div class="flex min-h-0 flex-1">
+    <!-- Activity bar -->
+    <nav class="flex w-12 shrink-0 flex-col items-center border-r border-vs-border bg-vs-bar py-1">
       <a
         routerLink="/connections"
-        routerLinkActive="bg-slate-700 text-white"
-        class="block rounded px-3 py-2 text-sm hover:bg-slate-800"
+        routerLinkActive="border-vs-accent! text-white!"
+        title="資料庫連線"
+        class="flex h-11 w-full items-center justify-center border-l-2 border-transparent text-vs-muted hover:text-white"
       >
-        資料庫連線
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="h-5.5 w-5.5">
+          <ellipse cx="12" cy="5" rx="7" ry="3" />
+          <path d="M5 5v14c0 1.66 3.13 3 7 3s7-1.34 7-3V5" />
+          <path d="M5 12c0 1.66 3.13 3 7 3s7-1.34 7-3" />
+        </svg>
       </a>
       <a
         routerLink="/import"
-        routerLinkActive="bg-slate-700 text-white"
-        class="block rounded px-3 py-2 text-sm hover:bg-slate-800"
+        routerLinkActive="border-vs-accent! text-white!"
+        title="匯入資料"
+        class="flex h-11 w-full items-center justify-center border-l-2 border-transparent text-vs-muted hover:text-white"
       >
-        匯入資料
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="h-5.5 w-5.5">
+          <path d="M12 3v10m0 0-4-4m4 4 4-4" />
+          <path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4" />
+        </svg>
       </a>
       <a
         routerLink="/mapping"
-        routerLinkActive="bg-slate-700 text-white"
-        class="block rounded px-3 py-2 text-sm hover:bg-slate-800"
+        routerLinkActive="border-vs-accent! text-white!"
+        title="欄位對應"
+        class="flex h-11 w-full items-center justify-center border-l-2 border-transparent text-vs-muted hover:text-white"
       >
-        欄位對應
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="h-5.5 w-5.5">
+          <path d="M8 7h13m0 0-3.5-3.5M21 7l-3.5 3.5" />
+          <path d="M16 17H3m0 0 3.5 3.5M3 17l3.5-3.5" />
+        </svg>
       </a>
       <a
         routerLink="/execute"
-        routerLinkActive="bg-slate-700 text-white"
-        class="block rounded px-3 py-2 text-sm hover:bg-slate-800"
+        routerLinkActive="border-vs-accent! text-white!"
+        title="ETL 執行"
+        class="flex h-11 w-full items-center justify-center border-l-2 border-transparent text-vs-muted hover:text-white"
       >
-        ETL 執行
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="h-5.5 w-5.5">
+          <path d="M7 5v14l12-7-12-7z" stroke-linejoin="round" />
+        </svg>
       </a>
     </nav>
-    <div class="px-4 py-3 text-xs text-slate-500">v0.1.0</div>
-  </aside>
 
-  <main class="flex-1 overflow-auto p-6">
-    <router-outlet />
-  </main>
+    <!-- 主工作區 + 底部輸出面板 -->
+    <div class="flex min-w-0 flex-1 flex-col">
+      <main class="min-h-0 flex-1 overflow-auto">
+        <router-outlet />
+      </main>
+
+      <!-- 輸出面板 -->
+      <section class="shrink-0 border-t border-vs-border">
+        <div class="flex h-8 items-center gap-4 bg-vs-bg px-3">
+          <button
+            type="button"
+            (click)="panelOpen.set(!panelOpen())"
+            class="cursor-pointer border-b text-[11px] tracking-widest uppercase"
+            [class.border-vs-accent]="panelOpen()"
+            [class.text-vs-text]="panelOpen()"
+            [class.border-transparent]="!panelOpen()"
+            [class.text-vs-muted]="!panelOpen()"
+          >
+            輸出
+          </button>
+          <span class="text-[11px] text-vs-muted">{{ log.entries().length }} 則</span>
+          <div class="ml-auto flex items-center gap-2">
+            <button
+              type="button"
+              (click)="log.clear()"
+              title="清除輸出"
+              class="cursor-pointer text-[11px] text-vs-muted hover:text-white"
+            >
+              清除
+            </button>
+            <button
+              type="button"
+              (click)="panelOpen.set(!panelOpen())"
+              class="cursor-pointer px-1 text-vs-muted hover:text-white"
+              [title]="panelOpen() ? '收合面板' : '展開面板'"
+            >
+              {{ panelOpen() ? "⌄" : "⌃" }}
+            </button>
+          </div>
+        </div>
+
+        @if (panelOpen()) {
+          <div #logBox class="h-44 overflow-auto bg-vs-bg px-3 pb-2 font-mono text-xs leading-5">
+            @for (e of log.entries(); track $index) {
+              <div class="whitespace-pre-wrap">
+                <span class="text-vs-muted">{{ timeOf(e.time) }}</span>
+                <span
+                  class="ml-2"
+                  [class.text-vs-text]="e.level === 'info'"
+                  [class.text-vs-success]="e.level === 'success'"
+                  [class.text-vs-warn]="e.level === 'warn'"
+                  [class.text-vs-error]="e.level === 'error'"
+                >[{{ e.source }}] {{ e.message }}</span>
+              </div>
+            } @empty {
+              <div class="pt-1 text-vs-muted">尚無輸出。連線測試與 ETL 執行的過程會顯示在這裡。</div>
+            }
+          </div>
+        }
+      </section>
+    </div>
+  </div>
+
+  <!-- 狀態列 -->
+  <footer
+    class="flex h-6 shrink-0 items-center gap-4 px-3 text-[11px] text-white"
+    [class.bg-vs-accent]="!ws.running()"
+    [class.bg-vs-running]="ws.running()"
+  >
+    @if (ws.running(); as p) {
+      <span>⟳ ETL 執行中 — {{ p.phase }} 批次 {{ p.batch }}/{{ p.totalBatches }}</span>
+      <span>成功 {{ p.successRows.toLocaleString() }}</span>
+      @if (p.errorRows > 0) {
+        <span>錯誤 {{ p.errorRows.toLocaleString() }}</span>
+      }
+    } @else {
+      <span>就緒</span>
+      @if (ws.activeConnection(); as conn) {
+        <span>{{ conn.name }}</span>
+      }
+    }
+    <span class="ml-auto">Elu ETL v0.1.0</span>
+  </footer>
 </div>

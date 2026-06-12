@@ -1,160 +1,108 @@
-<div class="mx-auto max-w-4xl">
-  <h1 class="mb-6 text-2xl font-semibold text-slate-800">ETL 執行</h1>
+<div class="flex h-full flex-col">
+  <!-- 工具列 -->
+  <div class="flex h-10 shrink-0 items-center gap-4 border-b border-vs-border px-3">
+    <span class="vs-section">ETL 執行</span>
 
-  @if (!state.job()) {
-    <p class="rounded-lg border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-500">
-      尚未設定任務，請先完成「匯入資料」與「欄位對應」。
-    </p>
-  } @else {
-    <!-- 任務摘要 -->
-    <div class="mb-6 rounded-lg bg-white p-6 shadow">
-      <h2 class="mb-3 text-sm font-medium text-slate-600">任務內容</h2>
-      <dl class="grid grid-cols-2 gap-x-8 gap-y-2 text-sm">
-        <div class="flex gap-2">
-          <dt class="text-slate-500">來源：</dt>
-          <dd class="text-slate-800">{{ fileName() }}（{{ state.job()!.sheet }}）</dd>
-        </div>
-        <div class="flex gap-2">
-          <dt class="text-slate-500">目標表：</dt>
-          <dd class="text-slate-800">{{ state.job()!.targetTable }}</dd>
-        </div>
-        <div class="flex gap-2">
-          <dt class="text-slate-500">對應欄數：</dt>
-          <dd class="text-slate-800">{{ state.job()!.rules.length }}</dd>
-        </div>
-        <div class="flex gap-2">
-          <dt class="text-slate-500">寫入模式：</dt>
-          <dd class="text-slate-800">
-            {{ state.job()!.writeMode.mode === "batchCommit" ? "批次提交" : "全有全無" }}
-            （批次 {{ state.job()!.batchSize.toLocaleString() }} 行）
-          </dd>
-        </div>
-      </dl>
+    @if (state.job(); as job) {
+      <span class="text-[11px] text-vs-muted">
+        {{ fileName() }}（{{ job.sheet }}）→ {{ job.targetTable }} ·
+        {{ job.rules.length }} 欄 ·
+        {{ job.writeMode.mode === "batchCommit" ? "批次提交" : "全有全無" }}
+      </span>
 
-      <div class="mt-4 flex items-center gap-3">
-        <button
-          type="button"
-          (click)="start()"
-          [disabled]="running()"
-          class="rounded bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-        >
-          {{ running() ? "執行中…" : "開始執行" }}
-        </button>
+      <div class="ml-auto flex items-center gap-2">
         @if (running()) {
-          <button
-            type="button"
-            (click)="cancel()"
-            class="rounded border border-red-300 px-4 py-2 text-sm font-medium text-red-600 hover:bg-red-50"
-          >
-            取消
-          </button>
+          <button type="button" (click)="cancel()" class="vs-btn-danger h-6">取消</button>
         }
         @if (canResume()) {
-          <button
-            type="button"
-            (click)="resume()"
-            class="rounded border border-blue-600 px-4 py-2 text-sm font-medium text-blue-600 hover:bg-blue-50"
-          >
-            從中斷點續跑
-          </button>
+          <button type="button" (click)="resume()" class="vs-btn-secondary h-6">從中斷點續跑</button>
         }
+        <button type="button" (click)="start()" [disabled]="running()" class="vs-btn h-6">
+          {{ running() ? "執行中…" : "▶ 開始執行" }}
+        </button>
       </div>
+    }
+  </div>
+
+  @if (!state.job()) {
+    <div class="flex flex-1 items-center justify-center">
+      <p class="text-sm text-vs-muted">尚未設定任務，請先完成「匯入資料」與「欄位對應」。</p>
     </div>
+  } @else {
+    <div class="min-h-0 flex-1 overflow-auto p-3">
+      <!-- 即時進度 -->
+      @if (running() || progress()) {
+        <div class="mb-4">
+          <div class="mb-1.5 flex items-center justify-between text-xs">
+            <span class="text-vs-muted">
+              @if (progress(); as p) {
+                {{ phaseLabel(p.phase) }} — 批次 {{ p.batch }} / {{ p.totalBatches }}
+              } @else {
+                準備中…
+              }
+            </span>
+            <span>{{ percent() }}%</span>
+          </div>
+          <div class="h-1 overflow-hidden rounded-full bg-vs-input">
+            <div class="h-full bg-vs-accent transition-all" [style.width.%]="percent()"></div>
+          </div>
+          @if (progress(); as p) {
+            <div class="mt-1.5 flex gap-5 text-[11px] text-vs-muted">
+              <span>成功 {{ p.successRows.toLocaleString() }}</span>
+              <span [class.text-vs-error]="p.errorRows > 0">錯誤 {{ p.errorRows.toLocaleString() }}</span>
+            </div>
+          }
+        </div>
+      }
 
-    <!-- 即時進度 -->
-    @if (running() || progress()) {
-      <div class="mb-6 rounded-lg bg-white p-6 shadow">
-        <div class="mb-2 flex items-center justify-between text-sm">
-          <span class="text-slate-600">
-            @if (progress(); as p) {
-              {{ phaseLabel(p.phase) }} — 批次 {{ p.batch }} / {{ p.totalBatches }}
-            } @else {
-              準備中…
-            }
+      @if (error(); as err) {
+        <p class="mb-4 text-xs text-vs-error">{{ err }}</p>
+      }
+
+      <!-- 完成統計 -->
+      @if (state.summary(); as s) {
+        <div class="mb-4 flex items-center gap-6 border-b border-vs-border pb-3 text-xs">
+          <span
+            class="font-semibold"
+            [class.text-vs-success]="s.status === 'completed'"
+            [class.text-vs-error]="s.status === 'failed' || s.status === 'aborted'"
+            [class.text-vs-warn]="s.status === 'cancelled'"
+          >
+            {{ statusLabel(s.status) }}
           </span>
-          <span class="font-medium text-slate-800">{{ percent() }}%</span>
-        </div>
-        <div class="h-3 overflow-hidden rounded-full bg-slate-200">
-          <div
-            class="h-full rounded-full bg-blue-600 transition-all"
-            [style.width.%]="percent()"
-          ></div>
-        </div>
-        @if (progress(); as p) {
-          <div class="mt-2 flex gap-6 text-xs text-slate-500">
-            <span>成功 {{ p.successRows.toLocaleString() }} 行</span>
-            <span [class.text-red-500]="p.errorRows > 0">錯誤 {{ p.errorRows.toLocaleString() }} 行</span>
-          </div>
-        }
-      </div>
-    }
-
-    @if (error(); as err) {
-      <p class="mb-6 rounded-lg bg-red-50 p-4 text-sm text-red-700">{{ err }}</p>
-    }
-
-    <!-- 完成統計 -->
-    @if (state.summary(); as s) {
-      <div class="rounded-lg bg-white p-6 shadow">
-        <h2 class="mb-3 text-sm font-medium text-slate-600">執行結果</h2>
-        <div class="mb-4 grid grid-cols-4 gap-4 text-center">
-          <div class="rounded bg-slate-50 p-3">
-            <div
-              class="text-lg font-semibold"
-              [class.text-green-600]="s.status === 'completed'"
-              [class.text-red-600]="s.status === 'failed' || s.status === 'aborted'"
-              [class.text-amber-600]="s.status === 'cancelled'"
-            >
-              {{ statusLabel(s.status) }}
-            </div>
-            <div class="text-xs text-slate-500">狀態</div>
-          </div>
-          <div class="rounded bg-slate-50 p-3">
-            <div class="text-lg font-semibold text-slate-800">{{ s.successRows.toLocaleString() }}</div>
-            <div class="text-xs text-slate-500">成功（共 {{ s.totalRows.toLocaleString() }}）</div>
-          </div>
-          <div class="rounded bg-slate-50 p-3">
-            <div class="text-lg font-semibold" [class.text-red-600]="s.errorRows > 0">
-              {{ s.errorRows.toLocaleString() }}
-            </div>
-            <div class="text-xs text-slate-500">錯誤</div>
-          </div>
-          <div class="rounded bg-slate-50 p-3">
-            <div class="text-lg font-semibold text-slate-800">{{ (s.elapsedMs / 1000).toFixed(1) }}s</div>
-            <div class="text-xs text-slate-500">耗時</div>
-          </div>
+          <span>成功 <b>{{ s.successRows.toLocaleString() }}</b> / {{ s.totalRows.toLocaleString() }} 行</span>
+          <span [class.text-vs-error]="s.errorRows > 0">錯誤 {{ s.errorRows.toLocaleString() }} 行</span>
+          <span class="text-vs-muted">耗時 {{ (s.elapsedMs / 1000).toFixed(1) }}s</span>
         </div>
 
         @if (s.failure) {
-          <p class="mb-4 rounded bg-red-50 px-3 py-2 text-sm text-red-700">{{ s.failure }}</p>
+          <p class="mb-3 text-xs text-vs-error">{{ s.failure }}</p>
         }
 
         @if (s.errors.length) {
-          <h3 class="mb-2 text-xs font-medium text-slate-500">
-            錯誤明細（顯示前 {{ s.errors.length }} 筆）
-          </h3>
-          <div class="max-h-64 overflow-auto rounded border border-slate-200">
-            <table class="min-w-full text-xs">
-              <thead class="sticky top-0 bg-slate-50">
-                <tr class="text-left text-slate-500">
-                  <th class="border-b border-slate-200 px-3 py-2">來源行號</th>
-                  <th class="border-b border-slate-200 px-3 py-2">欄位</th>
-                  <th class="border-b border-slate-200 px-3 py-2">原因</th>
+          <div class="vs-section mb-1.5">錯誤明細（前 {{ s.errors.length }} 筆）</div>
+          <div class="max-h-80 overflow-auto border border-vs-border">
+            <table class="vs-table">
+              <thead>
+                <tr>
+                  <th class="w-24">來源行號</th>
+                  <th class="w-40">欄位</th>
+                  <th>原因</th>
                 </tr>
               </thead>
               <tbody>
                 @for (e of s.errors; track $index) {
-                  <tr class="odd:bg-white even:bg-slate-50">
-                    <td class="border-b border-slate-100 px-3 py-1.5 text-slate-600">{{ e.row }}</td>
-                    <td class="border-b border-slate-100 px-3 py-1.5 text-slate-600">{{ e.column }}</td>
-                    <td class="border-b border-slate-100 px-3 py-1.5 text-slate-600">{{ e.reason }}</td>
+                  <tr>
+                    <td>{{ e.row }}</td>
+                    <td>{{ e.column }}</td>
+                    <td>{{ e.reason }}</td>
                   </tr>
                 }
               </tbody>
             </table>
           </div>
         }
-      </div>
-    }
+      }
+    </div>
   }
 </div>

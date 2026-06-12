@@ -1,1 +1,105 @@
 @import "tailwindcss";
+
+/* VSCode Dark+ 色票 */
+@theme {
+  --color-vs-bg: #1e1e1e; /* 編輯區背景 */
+  --color-vs-panel: #252526; /* 側欄 / 表頭 */
+  --color-vs-bar: #333333; /* activity bar */
+  --color-vs-topbar: #323233; /* 頂部工具列 */
+  --color-vs-border: #2b2b2b;
+  --color-vs-input: #3c3c3c;
+  --color-vs-hover: #2a2d2e;
+  --color-vs-active: #37373d;
+  --color-vs-text: #cccccc;
+  --color-vs-muted: #8c8c8c;
+  --color-vs-accent: #007acc;
+  --color-vs-button: #0e639c;
+  --color-vs-button-hover: #1177bb;
+  --color-vs-success: #89d185;
+  --color-vs-error: #f48771;
+  --color-vs-warn: #cca700;
+  --color-vs-type: #4ec9b0; /* 型別標籤（teal） */
+  --color-vs-running: #ca5010; /* 狀態列：執行中 */
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background-color: var(--color-vs-bg);
+  color: var(--color-vs-text);
+  font-size: 13px;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", system-ui,
+    "Ubuntu", "Droid Sans", "Noto Sans TC", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+input,
+textarea {
+  user-select: text;
+}
+
+/* VSCode 式捲軸 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(121, 121, 121, 0.35);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(150, 150, 150, 0.6);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* 共用緊湊元件 */
+.vs-input {
+  @apply h-7 rounded-[2px] border border-vs-input bg-vs-input px-2 text-[13px] text-vs-text outline-none focus:border-vs-accent disabled:opacity-40;
+}
+
+select.vs-input {
+  @apply pr-6;
+}
+
+.vs-btn {
+  @apply inline-flex h-7 cursor-pointer items-center rounded-[2px] bg-vs-button px-3 text-xs text-white hover:bg-vs-button-hover disabled:cursor-default disabled:opacity-40;
+}
+
+.vs-btn-secondary {
+  @apply inline-flex h-7 cursor-pointer items-center rounded-[2px] border border-[#5f5f5f] bg-transparent px-3 text-xs text-vs-text hover:bg-vs-hover disabled:cursor-default disabled:opacity-40;
+}
+
+.vs-btn-danger {
+  @apply inline-flex h-7 cursor-pointer items-center rounded-[2px] border border-transparent bg-transparent px-2 text-xs text-vs-error hover:bg-vs-hover disabled:opacity-40;
+}
+
+.vs-label {
+  @apply mb-1 block text-[11px] tracking-wide text-vs-muted;
+}
+
+.vs-section {
+  @apply text-[11px] font-semibold tracking-widest text-vs-muted uppercase;
+}
+
+.vs-table {
+  @apply min-w-full border-collapse text-xs;
+}
+.vs-table th {
+  @apply sticky top-0 border-b border-vs-border bg-vs-panel px-2.5 py-1.5 text-left text-[11px] font-normal text-vs-muted;
+}
+.vs-table td {
+  @apply border-b border-vs-border px-2.5 py-1 text-vs-text;
+}
+.vs-table tbody tr:hover {
+  background-color: var(--color-vs-hover);
+}
