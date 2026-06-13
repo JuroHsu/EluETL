@@ -126,58 +126,150 @@
         <router-outlet />
       </main>
 
-      <!-- 輸出面板 -->
+      <!-- 輸出面板（分頁：輸出 / 診斷 / 結果） -->
       <section class="shrink-0 border-t border-vs-border">
         <div class="flex h-8 items-center gap-4 bg-vs-bg px-3">
           <button
             type="button"
-            (click)="panelOpen.set(!panelOpen())"
-            class="cursor-pointer border-b text-[11px] tracking-widest uppercase"
-            [class.border-vs-accent]="panelOpen()"
-            [class.text-vs-text]="panelOpen()"
-            [class.border-transparent]="!panelOpen()"
-            [class.text-vs-muted]="!panelOpen()"
+            (click)="output.show('log')"
+            class="flex h-full cursor-pointer items-center gap-1.5 border-b text-[11px] tracking-widest uppercase"
+            [class.border-vs-accent]="output.panelOpen() && output.activeTab() === 'log'"
+            [class.text-vs-text]="output.panelOpen() && output.activeTab() === 'log'"
+            [class.border-transparent]="!(output.panelOpen() && output.activeTab() === 'log')"
+            [class.text-vs-muted]="!(output.panelOpen() && output.activeTab() === 'log')"
           >
             輸出
+            <span class="text-vs-muted">{{ log.entries().length }}</span>
           </button>
-          <span class="text-[11px] text-vs-muted">{{ log.entries().length }} 則</span>
+          <button
+            type="button"
+            (click)="output.show('diagnostics')"
+            class="flex h-full cursor-pointer items-center gap-1.5 border-b text-[11px] tracking-widest uppercase"
+            [class.border-vs-accent]="output.panelOpen() && output.activeTab() === 'diagnostics'"
+            [class.text-vs-text]="output.panelOpen() && output.activeTab() === 'diagnostics'"
+            [class.border-transparent]="!(output.panelOpen() && output.activeTab() === 'diagnostics')"
+            [class.text-vs-muted]="!(output.panelOpen() && output.activeTab() === 'diagnostics')"
+          >
+            診斷
+            @if (output.issues().length) {
+              <span class="rounded-full bg-vs-error/20 px-1.5 text-vs-error">{{ output.issues().length }}</span>
+            }
+          </button>
+          <button
+            type="button"
+            (click)="output.show('result')"
+            class="flex h-full cursor-pointer items-center gap-1.5 border-b text-[11px] tracking-widest uppercase"
+            [class.border-vs-accent]="output.panelOpen() && output.activeTab() === 'result'"
+            [class.text-vs-text]="output.panelOpen() && output.activeTab() === 'result'"
+            [class.border-transparent]="!(output.panelOpen() && output.activeTab() === 'result')"
+            [class.text-vs-muted]="!(output.panelOpen() && output.activeTab() === 'result')"
+          >
+            結果
+            @if (output.running()) {
+              <span class="text-vs-running">●</span>
+            }
+          </button>
+
           <div class="ml-auto flex items-center gap-2">
             <button
               type="button"
-              (click)="log.clear()"
-              title="清除輸出"
+              (click)="clearActive()"
+              title="清除目前分頁"
               class="cursor-pointer text-[11px] text-vs-muted hover:text-white"
             >
               清除
             </button>
             <button
               type="button"
-              (click)="panelOpen.set(!panelOpen())"
+              (click)="output.panelOpen.set(!output.panelOpen())"
               class="cursor-pointer px-1 text-vs-muted hover:text-white"
-              [title]="panelOpen() ? '收合面板' : '展開面板'"
+              [title]="output.panelOpen() ? '收合面板' : '展開面板'"
             >
-              {{ panelOpen() ? "⌄" : "⌃" }}
+              {{ output.panelOpen() ? "⌄" : "⌃" }}
             </button>
           </div>
         </div>
 
-        @if (panelOpen()) {
-          <div #logBox class="h-44 overflow-auto bg-vs-bg px-3 pb-2 font-mono text-xs leading-5">
-            @for (e of log.entries(); track $index) {
-              <div class="whitespace-pre-wrap">
-                <span class="text-vs-muted">{{ timeOf(e.time) }}</span>
-                <span
-                  class="ml-2"
-                  [class.text-vs-text]="e.level === 'info'"
-                  [class.text-vs-success]="e.level === 'success'"
-                  [class.text-vs-warn]="e.level === 'warn'"
-                  [class.text-vs-error]="e.level === 'error'"
-                >[{{ e.source }}] {{ e.message }}</span>
+        @if (output.panelOpen()) {
+          @switch (output.activeTab()) {
+            @case ("log") {
+              <div #logBox class="h-44 overflow-auto bg-vs-bg px-3 pb-2 font-mono text-xs leading-5">
+                @for (e of log.entries(); track $index) {
+                  <div class="whitespace-pre-wrap">
+                    <span class="text-vs-muted">{{ timeOf(e.time) }}</span>
+                    <span
+                      class="ml-2"
+                      [class.text-vs-text]="e.level === 'info'"
+                      [class.text-vs-success]="e.level === 'success'"
+                      [class.text-vs-warn]="e.level === 'warn'"
+                      [class.text-vs-error]="e.level === 'error'"
+                    >[{{ e.source }}] {{ e.message }}</span>
+                  </div>
+                } @empty {
+                  <div class="pt-1 text-vs-muted">尚無輸出。連線測試與 ETL 執行的過程會顯示在這裡。</div>
+                }
               </div>
-            } @empty {
-              <div class="pt-1 text-vs-muted">尚無輸出。連線測試與 ETL 執行的過程會顯示在這裡。</div>
             }
-          </div>
+            @case ("diagnostics") {
+              <div class="h-44 overflow-auto bg-vs-bg px-3 pb-2 text-xs leading-5">
+                @if (output.checkMessage(); as msg) {
+                  <p class="pt-1 text-vs-success">✓ {{ msg }}</p>
+                }
+                @for (issue of output.issues(); track $index) {
+                  <p class="text-vs-error">✕ 第 {{ issue.line }} 行：{{ issue.message }}</p>
+                }
+                @if (!output.checkMessage() && !output.issues().length) {
+                  <div class="pt-1 text-vs-muted">尚無診斷。按工具列「驗證」檢查語法與來源欄位。</div>
+                }
+              </div>
+            }
+            @case ("result") {
+              <div class="h-44 overflow-auto bg-vs-bg px-3 pb-2 text-xs leading-5">
+                @if (output.error(); as err) {
+                  <p class="pt-1 text-vs-error">{{ err }}</p>
+                }
+                @if (output.running() && output.progress(); as p) {
+                  <div class="mt-1 flex items-center gap-3">
+                    <div class="h-1 w-48 overflow-hidden rounded-full bg-vs-input">
+                      <div
+                        class="h-full bg-vs-accent transition-all"
+                        [style.width.%]="p.totalBatches ? (p.batch / p.totalBatches) * 100 : 0"
+                      ></div>
+                    </div>
+                    <span class="text-vs-muted">
+                      {{ p.phase }} — 批次 {{ p.batch }}/{{ p.totalBatches }} · 寫入 {{ p.successRows.toLocaleString() }}
+                    </span>
+                  </div>
+                }
+                @if (output.summary(); as s) {
+                  <div class="mt-1 flex items-center gap-5">
+                    <span
+                      class="font-semibold"
+                      [class.text-vs-success]="s.status === 'completed'"
+                      [class.text-vs-error]="s.status !== 'completed'"
+                    >
+                      {{ output.statusLabel(s.status) }}
+                    </span>
+                    <span>寫入 {{ s.successRows.toLocaleString() }} 行（來源 {{ s.totalRows.toLocaleString() }} 行）</span>
+                    <span [class.text-vs-error]="s.errorRows > 0">錯誤 {{ s.errorRows.toLocaleString() }}</span>
+                    <span class="text-vs-muted">{{ (s.elapsedMs / 1000).toFixed(1) }}s</span>
+                  </div>
+                  @if (s.failure) {
+                    <p class="mt-1 text-vs-error">{{ s.failure }}</p>
+                  }
+                  @for (e of s.errors.slice(0, 50); track $index) {
+                    <p class="text-vs-muted">第 {{ e.row }} 行 [{{ e.column }}] {{ e.reason }}</p>
+                  }
+                  @if (s.errors.length > 50) {
+                    <p class="text-vs-muted">…其餘 {{ s.errors.length - 50 }} 筆省略</p>
+                  }
+                }
+                @if (!output.error() && !output.summary() && !output.running()) {
+                  <div class="pt-1 text-vs-muted">尚無執行結果。按工具列「▶ 執行」開始遷移作業。</div>
+                }
+              </div>
+            }
+          }
         }
       </section>
     </div>

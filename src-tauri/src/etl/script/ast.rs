@@ -110,8 +110,10 @@ pub enum Expr {
     Bool(bool),
     Null,
     Gen(GenKind),
-    /// 合成欄位：各項轉為文字後串接（NULL 視為空字串），如
-    /// `N'MICROSOFT_ENTRA_ID:' + [dbo].[DirectoryAccounts].[DisplayName]`
+    /// 合成欄位（字串模板）：各項轉為文字後串接（NULL 視為空字串）。
+    /// 來源語法為帶 `{…}` 插值的字串，動態值寫在大括號內，如
+    /// `N'MICROSOFT_ENTRA_ID: {[source].[displayName]}'`
+    /// （舊式 `'前綴' + [欄位]` 串接仍可解析，會正規化為此模板形式）。
     Concat(Vec<Expr>),
 }
 
@@ -139,11 +141,32 @@ impl Expr {
             Expr::Bool(b) => (if *b { "TRUE" } else { "FALSE" }).to_string(),
             Expr::Null => "NULL".to_string(),
             Expr::Gen(k) => format!("Gen.{}", k.label()),
-            Expr::Concat(parts) => parts
-                .iter()
-                .map(Expr::to_dsl)
-                .collect::<Vec<_>>()
-                .join(" + "),
+            // 字串模板：固定文字直接寫入引號內，動態值（欄位 / Gen / 數值）放在 {…} 內；
+            // 字面大括號以 {{ }} 跳脫。如 N'MICROSOFT_ENTRA_ID: {[source].[displayName]}'
+            Expr::Concat(parts) => {
+                let mut s = String::from("N'");
+                for p in parts {
+                    match p {
+                        Expr::Text(t) => {
+                            for ch in t.chars() {
+                                match ch {
+                                    '\'' => s.push_str("''"),
+                                    '{' => s.push_str("{{"),
+                                    '}' => s.push_str("}}"),
+                                    c => s.push(c),
+                                }
+                            }
+                        }
+                        other => {
+                            s.push('{');
+                            s.push_str(&other.to_dsl());
+                            s.push('}');
+                        }
+                    }
+                }
+                s.push('\'');
+                s
+            }
         }
     }
 }

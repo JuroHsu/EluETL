@@ -18,10 +18,9 @@ import { EditorView, basicSetup } from "codemirror";
 
 import { EtlStateService } from "../../services/etl-state.service";
 import { LogService } from "../../services/log.service";
+import { OutputService } from "../../services/output.service";
 import {
   ColumnInfo,
-  EtlProgress,
-  EtlSummary,
   ScriptIssue,
   ScriptModel,
   ScriptWorkModel,
@@ -36,14 +35,15 @@ const SAMPLE = `-- 遷移作業範例：以 email 比對既有帳號，將外部
 -- 也可手寫 SOURCE = FILE(...) / CONNECTION('名稱') 覆寫（密碼一律不入檔）
 -- Gen.XXX 為產生器：GUID / ULID / Date / DateTime / SHA256（整列雜湊）等
 WORK 'EluCloudAccount綁定EnterId' {
-If [SOURCE].userPrincipalName == [dbo].[DirectoryAccounts].Email
-[dbo].[ExternalIdentityMappings] ADD
-{
- Id = Gen.ULID
-,AccountId = [dbo].[DirectoryAccounts].Id
-,ExternalId = [SOURCE].id
-,ExternalSystemType = N'MICROSOFT_ENTRA_ID'
-}
+  If [SOURCE].[userPrincipalName] == [dbo].[DirectoryAccounts].[Email]
+  [dbo].[ExternalIdentityMappings]
+  ADD {
+     [Id] = Gen.ULID
+    ,[AccountId] = [dbo].[DirectoryAccounts].[Id]
+    ,[ExternalId] = [SOURCE].[id]
+    ,[ExternalSystemType] = N'MICROSOFT_ENTRA_ID'
+    ,[Label] = N'MICROSOFT_ENTRA_ID: {[dbo].[DirectoryAccounts].[DisplayName]}'
+  }
 }
 GO
 `;
@@ -87,7 +87,7 @@ interface AssignRow {
   /** 值來源：來源欄位 / 比對表欄位 / 常值 / 生成 / 合成欄位 */
   kind: "source" | "lookup" | "literal" | "gen" | "concat";
   /** source/lookup = 欄位名稱；literal = 字面值原文；gen = 產生器名稱；
-   *  concat = `+` 串接運算式（如 N'前綴:' + [SOURCE].[Name]） */
+   *  concat = 字串模板（如 N'前綴: {[SOURCE].[Name]}'，{…} 內為插值運算式） */
   value: string;
 }
 
@@ -113,6 +113,8 @@ export class WorksPage implements AfterViewInit, OnDestroy {
   private readonly log = inject(LogService);
   readonly ws = inject(WorkspaceService);
   readonly state = inject(EtlStateService);
+  /** 診斷 / 進度 / 結果統一寫入底部輸出面板（分頁呈現） */
+  readonly output = inject(OutputService);
 
   private readonly editorHost = viewChild.required<ElementRef<HTMLElement>>("editorHost");
   private view: EditorView | null = null;
@@ -127,17 +129,11 @@ export class WorksPage implements AfterViewInit, OnDestroy {
   readonly lookupColumns = signal<ColumnInfo[]>([]);
   private readonly colCache = new Map<string, ColumnInfo[]>();
 
-  readonly issues = signal<ScriptIssue[]>([]);
-  readonly checkMessage = signal<string | null>(null);
-  readonly running = signal(false);
-  readonly progress = signal<EtlProgress | null>(null);
-  readonly summary = signal<EtlSummary | null>(null);
-  readonly error = signal<string | null>(null);
   /** 目前開啟的 .etl 檔案路徑（null = 未命名） */
   readonly currentFile = signal<string | null>(null);
   private jobId: string | null = null;
 
-  readonly canRun = computed(() => !this.running());
+  readonly canRun = computed(() => !this.output.running());
   readonly generators = GENERATORS;
 
   constructor() {
@@ -177,6 +173,9 @@ export class WorksPage implements AfterViewInit, OnDestroy {
         EditorView.theme({
           "&": { height: "100%", fontSize: "13px", backgroundColor: "#1e1e1e" },
           ".cm-gutters": { backgroundColor: "#1e1e1e" },
+          // body 全域 cursor: default 會被繼承，這裡顯式還原文字編輯游標（I-beam）
+          ".cm-content": { cursor: "text" },
+          ".cm-scroller": { cursor: "text" },
         }),
       ],
       parent: this.editorHost().nativeElement,
@@ -209,10 +208,13 @@ export class WorksPage implements AfterViewInit, OnDestroy {
   }
 
   async toggleTextMode(): Promise<void> {
-    this.checkMessage.set(null);
+    this.output.checkMessage.set(null);
     if (this.textMode()) {
       if (await this.parseIntoModel(this.editorText())) {
         this.textMode.set(false);
+      } else {
+        // 解析失敗無法切到視覺模式：把錯誤帶到診斷分頁讓使用者看到原因
+        this.output.show("diagnostics");
       }
     } else {
       this.setEditorText(this.generateScript());
@@ -226,11 +228,11 @@ export class WorksPage implements AfterViewInit, OnDestroy {
       const warnings = this.syncHeaderToWorkspace(m);
       this.works.set(this.modelToWorks(m));
       this.selected.set(this.works().length ? 0 : -1);
-      this.issues.set(warnings);
+      this.output.issues.set(warnings);
       void this.refreshColumnsForSelected();
       return true;
     } catch (e) {
-      this.issues.set([{ line: 0, message: errorMessage(e) }]);
+      this.output.issues.set([{ line: 0, message: errorMessage(e) }]);
       return false;
     }
   }
@@ -404,17 +406,17 @@ export class WorksPage implements AfterViewInit, OnDestroy {
       lines.push(`WORK '${this.esc(w.name)}' {`);
       if (w.useCondition && w.condSourceColumn && w.condTable && w.condColumn) {
         lines.push(
-          `If [SOURCE].[${w.condSourceColumn}] == ${this.tableRef(w.condTable)}.[${w.condColumn}]`,
+          `  If [SOURCE].[${w.condSourceColumn}] == ${this.tableRef(w.condTable)}.[${w.condColumn}]`,
         );
       }
-      lines.push(`${this.tableRef(w.targetTable)} ADD`);
-      lines.push("{");
+      lines.push(`  ${this.tableRef(w.targetTable)}`);
+      lines.push("  ADD {");
       w.assigns
         .filter((a) => a.targetColumn)
         .forEach((a, i) => {
-          lines.push(`${i === 0 ? " " : ","}[${a.targetColumn}] = ${this.valueText(w, a)}`);
+          lines.push(`    ${i === 0 ? " " : ","}[${a.targetColumn}] = ${this.valueText(w, a)}`);
         });
-      lines.push("}");
+      lines.push("  }");
       lines.push("}");
     }
     lines.push("GO");
@@ -694,13 +696,13 @@ export class WorksPage implements AfterViewInit, OnDestroy {
       const content = await this.tauri.loadEtlFile(path);
       this.setEditorText(content);
       this.currentFile.set(path);
-      this.summary.set(null);
-      this.checkMessage.set(null);
+      this.output.clearResult();
+      this.output.checkMessage.set(null);
       const ok = await this.parseIntoModel(content);
       this.textMode.set(!ok);
       this.log.info("作業", `已開啟 ${this.etlFileName()}`);
     } catch (e) {
-      this.error.set(errorMessage(e));
+      this.log.error("作業", errorMessage(e));
     }
   }
 
@@ -721,37 +723,38 @@ export class WorksPage implements AfterViewInit, OnDestroy {
       this.currentFile.set(path);
       this.log.success("作業", `已儲存 ${this.etlFileName()}`);
     } catch (e) {
-      this.error.set(errorMessage(e));
+      this.log.error("作業", errorMessage(e));
     }
   }
 
   async insertSample(): Promise<void> {
     this.setEditorText(SAMPLE);
-    this.summary.set(null);
-    this.checkMessage.set(null);
+    this.output.clearResult();
+    this.output.checkMessage.set(null);
     const ok = await this.parseIntoModel(SAMPLE);
     this.textMode.set(!ok);
   }
 
   async validate(): Promise<void> {
-    this.checkMessage.set(null);
-    this.issues.set([]);
+    this.output.show("diagnostics");
+    this.output.checkMessage.set(null);
+    this.output.issues.set([]);
     const cols = this.state.preview()?.columns.map((c) => c.name) ?? null;
     try {
       const check = await this.tauri.validateEtlScript(this.currentText(), cols);
-      this.issues.set(check.issues);
-      this.checkMessage.set(
+      this.output.issues.set(check.issues);
+      this.output.checkMessage.set(
         check.ok
           ? `語法正確（${check.statementCount} 個工作項目${cols ? "，來源欄位已核對" : "；尚未載入來源，僅檢查語法"}）`
           : null,
       );
     } catch (e) {
-      this.issues.set([{ line: 0, message: errorMessage(e) }]);
+      this.output.issues.set([{ line: 0, message: errorMessage(e) }]);
     }
   }
 
   async run(): Promise<void> {
-    if (this.running()) {
+    if (this.output.running()) {
       return;
     }
     // 工作區選擇作為回退；腳本內的 SOURCE / TARGET 標頭優先（後端解析）
@@ -760,10 +763,9 @@ export class WorksPage implements AfterViewInit, OnDestroy {
     const dbQuery = this.state.dbQuery();
     const sourcePath = isDb ? null : this.state.sourcePath();
     const sourceConnId = isDb && dbQuery ? this.state.dbConnId() : null;
-    this.running.set(true);
-    this.error.set(null);
-    this.summary.set(null);
-    this.progress.set(null);
+    this.output.show("result");
+    this.output.clearResult();
+    this.output.running.set(true);
     this.jobId = crypto.randomUUID();
     this.log.info("作業", `開始執行 ${this.etlFileName()}`);
 
@@ -783,7 +785,7 @@ export class WorksPage implements AfterViewInit, OnDestroy {
           script: this.currentText(),
         },
         (p) => {
-          this.progress.set(p);
+          this.output.progress.set(p);
           this.ws.running.set(p);
           if (p.phase === "load" && p.batch !== lastBatch && p.batch > 0) {
             lastBatch = p.batch;
@@ -794,8 +796,8 @@ export class WorksPage implements AfterViewInit, OnDestroy {
           }
         },
       );
-      this.summary.set(summary);
-      const msg = `${this.statusLabel(summary.status)} — 寫入 ${summary.successRows.toLocaleString()} 行（來源 ${summary.totalRows.toLocaleString()} 行），錯誤 ${summary.errorRows.toLocaleString()}，耗時 ${(summary.elapsedMs / 1000).toFixed(1)}s`;
+      this.output.summary.set(summary);
+      const msg = `${this.output.statusLabel(summary.status)} — 寫入 ${summary.successRows.toLocaleString()} 行（來源 ${summary.totalRows.toLocaleString()} 行），錯誤 ${summary.errorRows.toLocaleString()}，耗時 ${(summary.elapsedMs / 1000).toFixed(1)}s`;
       if (summary.status === "completed" && summary.errorRows === 0) {
         this.log.success("作業", msg);
       } else if (summary.status === "completed") {
@@ -804,10 +806,10 @@ export class WorksPage implements AfterViewInit, OnDestroy {
         this.log.error("作業", `${msg}${summary.failure ? " — " + summary.failure : ""}`);
       }
     } catch (e) {
-      this.error.set(errorMessage(e));
+      this.output.error.set(errorMessage(e));
       this.log.error("作業", errorMessage(e));
     } finally {
-      this.running.set(false);
+      this.output.running.set(false);
       this.ws.running.set(null);
     }
   }
@@ -817,11 +819,5 @@ export class WorksPage implements AfterViewInit, OnDestroy {
       await this.tauri.cancelEtl(this.jobId);
       this.log.warn("作業", "已送出取消請求");
     }
-  }
-
-  statusLabel(s: EtlSummary["status"]): string {
-    return (
-      { completed: "完成", cancelled: "已取消", failed: "失敗", aborted: "已中止" }[s] ?? s
-    );
   }
 }

@@ -279,6 +279,14 @@ where
             ));
         }
 
+        if stmt.assignments.is_empty() {
+            return Err(EluEtlError::Etl(format!(
+                "第 {} 行：作業「{}」沒有任何欄位指派，至少需要一個",
+                stmt.line,
+                stmt.name.as_deref().unwrap_or("-")
+            )));
+        }
+
         // ---- 解析目標表與欄位型別 ----
         let target = table_ref_to_string(&stmt.target_table, dialect)?;
         let target_cols = driver.get_columns(&target).await.map_err(|e| {

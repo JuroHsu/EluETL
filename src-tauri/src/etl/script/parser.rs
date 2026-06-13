@@ -285,16 +285,19 @@ impl Parser {
         })
     }
 
-    /// 運算式：單一項，或以 `+` 串接的合成欄位（轉文字後串接）。
+    /// 運算式：單一項，或舊式以 `+` 串接的合成欄位（仍相容；新語法為字串模板）。
     fn parse_expr(&mut self) -> Result<Expr, ScriptIssue> {
         let first = self.parse_term()?;
         if self.peek() != Some(&Tok::Plus) {
             return Ok(first);
         }
-        let mut parts = vec![first];
+        // 扁平化為單層 Concat（模板項也一併展開），輸出時統一正規化為 {…} 模板形式
+        let mut parts: Vec<Expr> = Vec::new();
+        push_concat_part(&mut parts, first);
         while self.peek() == Some(&Tok::Plus) {
             self.next();
-            parts.push(self.parse_term()?);
+            let term = self.parse_term()?;
+            push_concat_part(&mut parts, term);
         }
         Ok(Expr::Concat(parts))
     }
@@ -304,12 +307,14 @@ impl Parser {
         match self.peek() {
             Some(Tok::Str(_)) => {
                 let Some(Token {
-                    tok: Tok::Str(s), ..
+                    tok: Tok::Str(s),
+                    line,
                 }) = self.next()
                 else {
                     unreachable!()
                 };
-                Ok(Expr::Text(s))
+                // 字串模板：掃描 {…} 插值；無插值即為純文字
+                parse_template(&s, line)
             }
             Some(Tok::Number(_)) => {
                 let Some(Token {
@@ -612,9 +617,8 @@ impl Parser {
                 line,
             });
         }
-        if assignments.is_empty() {
-            return Err(err(stmt_line, "至少需要一個欄位指派"));
-        }
+        // 空的 ADD {} 仍可解析（讓視覺編輯器能開啟未完成的作業）；
+        // 「至少一個欄位指派」改由 validate / 執行時把關。
 
         Ok(Statement {
             name: None,
@@ -640,6 +644,83 @@ impl Parser {
         }
         Ok(stmt)
     }
+}
+
+/// 扁平化 Concat：把巢狀的 Concat 項展開到同一層，避免 `+` 與模板混用時產生巢狀。
+fn push_concat_part(parts: &mut Vec<Expr>, e: Expr) {
+    match e {
+        Expr::Concat(inner) => parts.extend(inner),
+        other => parts.push(other),
+    }
+}
+
+/// 解析字串模板：固定文字 + `{運算式}` 插值（`{{` / `}}` 跳脫為字面大括號）。
+/// 無任何插值時回傳純文字 `Expr::Text`；含插值時回傳 `Expr::Concat`（文字段與插值項交錯）。
+fn parse_template(s: &str, line: usize) -> Result<Expr, ScriptIssue> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut parts: Vec<Expr> = Vec::new();
+    let mut lit = String::new();
+    let mut has_hole = false;
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '{' if chars.get(i + 1) == Some(&'{') => {
+                lit.push('{');
+                i += 2;
+            }
+            '}' if chars.get(i + 1) == Some(&'}') => {
+                lit.push('}');
+                i += 2;
+            }
+            '{' => {
+                if !lit.is_empty() {
+                    parts.push(Expr::Text(std::mem::take(&mut lit)));
+                }
+                i += 1;
+                let mut inner = String::new();
+                while i < chars.len() && chars[i] != '}' {
+                    inner.push(chars[i]);
+                    i += 1;
+                }
+                if i >= chars.len() {
+                    return Err(err(line, "字串插值缺少結尾 }（如需字面大括號請用 {{ }}）"));
+                }
+                i += 1; // 吃掉 }
+                parts.push(parse_hole_expr(&inner, line)?);
+                has_hole = true;
+            }
+            '}' => {
+                return Err(err(line, "字串中出現未配對的 }（如需字面大括號請用 {{ }}）"));
+            }
+            c => {
+                lit.push(c);
+                i += 1;
+            }
+        }
+    }
+    if !has_hole {
+        // 無插值：整段（已套用 {{ }} 跳脫）即為純文字
+        return Ok(Expr::Text(lit));
+    }
+    if !lit.is_empty() {
+        parts.push(Expr::Text(lit));
+    }
+    Ok(Expr::Concat(parts))
+}
+
+/// 解析 `{…}` 插值內容為運算式（欄位參照 / Gen / 數值等）；需完整消耗。
+fn parse_hole_expr(inner: &str, line: usize) -> Result<Expr, ScriptIssue> {
+    let trimmed = inner.trim();
+    if trimmed.is_empty() {
+        return Err(err(line, "字串插值 {} 內不可為空"));
+    }
+    let tokens = lex(trimmed)?;
+    let mut p = Parser { tokens, pos: 0 };
+    let expr = p.parse_expr()?;
+    if p.peek().is_some() {
+        return Err(err(line, format!("字串插值 {{{trimmed}}} 含無法解析的內容")));
+    }
+    Ok(expr)
 }
 
 /// 解析整份腳本：選擇性 SOURCE/TARGET 標頭 + 工作項目。
@@ -813,12 +894,53 @@ GO
     }
 
     #[test]
-    fn parses_concat_expressions() {
-        // 使用者範例：常值 + 比對表欄位、來源欄位 + 常值
+    fn parses_template_string_interpolation() {
+        // 使用者範例：固定文字 + {來源欄位} 插值
+        let script =
+            parse("[t] ADD { Label = N'MICROSOFT_ENTRA_ID: {[source].[displayName]}' }").unwrap();
+        let v = &script.statements[0].assignments[0].value;
+        let Expr::Concat(parts) = v else {
+            panic!("預期模板合成欄位");
+        };
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(&parts[0], Expr::Text(t) if t == "MICROSOFT_ENTRA_ID: "));
+        assert!(
+            matches!(&parts[1], Expr::Col(r) if r.column == "displayName" && r.prefix == vec!["source"])
+        );
+        assert_eq!(
+            v.to_dsl(),
+            "N'MICROSOFT_ENTRA_ID: {[source].[displayName]}'"
+        );
+
+        // 純文字（無插值）仍是 Text，非合成欄位
+        let s = parse("[t] ADD { x = N'plain text' }").unwrap();
+        assert!(matches!(&s.statements[0].assignments[0].value, Expr::Text(t) if t == "plain text"));
+
+        // {{ }} 跳脫為字面大括號
+        let s = parse("[t] ADD { x = N'a {{b}} c' }").unwrap();
+        assert!(matches!(&s.statements[0].assignments[0].value, Expr::Text(t) if t == "a {b} c"));
+
+        // Gen 與比對表欄位皆可作為插值，且多段交錯
+        let s = parse("[t] ADD { x = N'{Gen.ULID}-{[dbo].[T].[c]}' }").unwrap();
+        let Expr::Concat(p) = &s.statements[0].assignments[0].value else {
+            panic!("預期模板合成欄位");
+        };
+        assert_eq!(p.len(), 3);
+        assert!(matches!(p[0], Expr::Gen(GenKind::Ulid)));
+        assert!(matches!(&p[1], Expr::Text(t) if t == "-"));
+        assert!(matches!(&p[2], Expr::Col(_)));
+
+        // 缺結尾 } / 空插值 → 錯誤
+        assert!(parse("[t] ADD { x = N'a {[b].[c]' }").is_err());
+        assert!(parse("[t] ADD { x = N'a {} b' }").is_err());
+    }
+
+    #[test]
+    fn legacy_plus_concat_still_parses_and_normalizes() {
+        // 舊式 `+` 串接仍可解析，並正規化（to_dsl）為 {…} 模板形式
         let script = parse(
             "[t] ADD {
                a = N'MICROSOFT_ENTRA_ID:' + [dbo].[DirectoryAccounts].[DisplayName],
-               b = SOURCE.displayName + N'MICROSOFT_ENTRA_ID',
                c = N'x' + Gen.GUID + 1
              }",
         )
@@ -833,23 +955,31 @@ GO
         assert!(matches!(&parts[1], Expr::Col(r) if r.column == "DisplayName"));
         assert_eq!(
             a[0].value.to_dsl(),
-            "N'MICROSOFT_ENTRA_ID:' + [dbo].[DirectoryAccounts].[DisplayName]"
+            "N'MICROSOFT_ENTRA_ID:{[dbo].[DirectoryAccounts].[DisplayName]}'"
         );
 
+        // 扁平化：`+` 串接不產生巢狀 Concat
         let Expr::Concat(parts) = &a[1].value else {
-            panic!("預期合成欄位");
-        };
-        assert!(matches!(&parts[0], Expr::Col(r) if r.prefix == vec!["SOURCE"]));
-
-        let Expr::Concat(parts) = &a[2].value else {
             panic!("預期合成欄位");
         };
         assert_eq!(parts.len(), 3);
         assert!(matches!(parts[1], Expr::Gen(GenKind::Guid)));
         assert!(matches!(parts[2], Expr::Int(1)));
+        assert_eq!(a[1].value.to_dsl(), "N'x{Gen.GUID}{1}'");
 
         // 尾隨 + 缺項 → 錯誤
         assert!(parse("[t] ADD { x = N'a' + }").is_err());
+    }
+
+    #[test]
+    fn empty_add_block_parses() {
+        // 空的 ADD {} 不再是解析錯誤（視覺編輯器需能開啟未完成的作業）
+        let script = parse("WORK 'A' { [t] ADD { } }").unwrap();
+        assert_eq!(script.statements.len(), 1);
+        assert!(script.statements[0].assignments.is_empty());
+
+        let script = parse("[t] ADD {}\nGO").unwrap();
+        assert!(script.statements[0].assignments.is_empty());
     }
 
     #[test]

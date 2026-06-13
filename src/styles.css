@@ -71,6 +71,22 @@ select.vs-input {
   @apply pr-6;
 }
 
+/* 合成欄位（字串模板）輸入：緊湊單行，聚焦（點擊）時展開為多行編輯區。
+   以 element+class 選擇器確保覆寫 .vs-input 的固定高度（未分層，勝過 Tailwind utilities）。 */
+textarea.vs-concat {
+  height: 1.75rem;
+  min-height: 1.75rem;
+  padding-block: 0.3rem;
+  line-height: 1.05rem;
+  resize: none;
+  overflow: hidden;
+  transition: height 0.12s ease;
+}
+textarea.vs-concat:focus {
+  height: 6rem;
+  overflow: auto;
+}
+
 .vs-btn {
   @apply inline-flex h-7 cursor-pointer items-center rounded-[2px] bg-vs-button px-3 text-xs text-white hover:bg-vs-button-hover disabled:cursor-default disabled:opacity-40;
 }

@@ -68,6 +68,17 @@ pub fn validate_etl_script(script: String, source_columns: Option<Vec<String>>) 
     };
 
     let mut issues = Vec::new();
+    for stmt in &parsed.statements {
+        if stmt.assignments.is_empty() {
+            issues.push(ScriptIssue {
+                line: stmt.line,
+                message: format!(
+                    "作業「{}」沒有任何欄位指派，至少需要一個",
+                    stmt.name.as_deref().unwrap_or("-")
+                ),
+            });
+        }
+    }
     if let Some(cols) = &source_columns {
         let lower: Vec<String> = cols.iter().map(|c| c.to_lowercase()).collect();
         let mut check = |name: &str, line: usize| {

@@ -18,11 +18,11 @@
     <div class="ml-auto flex items-center gap-2">
       <button type="button" (click)="insertSample()" class="vs-btn-secondary h-6">插入範例</button>
       <button type="button" (click)="validate()" class="vs-btn-secondary h-6">驗證</button>
-      @if (running()) {
+      @if (output.running()) {
         <button type="button" (click)="cancel()" class="vs-btn-danger h-6">取消</button>
       }
       <button type="button" (click)="run()" [disabled]="!canRun()" class="vs-btn h-6">
-        {{ running() ? "執行中…" : "▶ 執行" }}
+        {{ output.running() ? "執行中…" : "▶ 執行" }}
       </button>
       <button type="button" (click)="toggleTextMode()" class="vs-btn-secondary h-6">
         {{ textMode() ? "切換視覺編輯" : "切換文字編輯" }}
@@ -195,13 +195,14 @@
                         }
                       </select>
                     } @else if (a.kind === "concat") {
-                      <input
+                      <textarea
                         [(ngModel)]="a.value"
-                        placeholder="N'前綴:' + [SOURCE].[欄位] 或 [比對表].[欄位] + N'@尾碼'"
+                        rows="1"
+                        placeholder="N'前綴: {[SOURCE].[欄位]} 尾碼'（{…} 內放來源/比對表欄位或 Gen）"
                         spellcheck="false"
-                        class="vs-input h-6 w-full min-w-72 font-mono text-xs"
-                        title="以 + 串接常值、來源欄位、比對表欄位與 Gen 產生器；NULL 視為空字串"
-                      />
+                        class="vs-input vs-concat w-full min-w-72 font-mono text-xs"
+                        title="字串模板：固定文字直接寫，動態值放在 {…} 內（如 {[SOURCE].[displayName]}、{Gen.ULID}）；需要字面大括號時請重複輸入跳脫，NULL 視為空字串。點擊可展開多行編輯。"
+                      ></textarea>
                     } @else {
                       <input
                         [(ngModel)]="a.value"
@@ -265,55 +266,4 @@
       }
     </datalist>
   }
-
-  <!-- 診斷 / 進度 / 結果 -->
-  <div class="max-h-48 shrink-0 overflow-auto border-t border-vs-border px-3 py-2 text-xs">
-    @if (checkMessage(); as msg) {
-      <p class="text-vs-success">✓ {{ msg }}</p>
-    }
-    @for (issue of issues(); track $index) {
-      <p class="text-vs-error">✕ 第 {{ issue.line }} 行：{{ issue.message }}</p>
-    }
-    @if (error(); as err) {
-      <p class="text-vs-error">{{ err }}</p>
-    }
-
-    @if (running() && progress(); as p) {
-      <div class="mt-1 flex items-center gap-3">
-        <div class="h-1 w-48 overflow-hidden rounded-full bg-vs-input">
-          <div
-            class="h-full bg-vs-accent transition-all"
-            [style.width.%]="p.totalBatches ? (p.batch / p.totalBatches) * 100 : 0"
-          ></div>
-        </div>
-        <span class="text-vs-muted">
-          {{ p.phase }} — 批次 {{ p.batch }}/{{ p.totalBatches }} · 寫入 {{ p.successRows.toLocaleString() }}
-        </span>
-      </div>
-    }
-
-    @if (summary(); as s) {
-      <div class="mt-1 flex items-center gap-5">
-        <span
-          class="font-semibold"
-          [class.text-vs-success]="s.status === 'completed'"
-          [class.text-vs-error]="s.status !== 'completed'"
-        >
-          {{ statusLabel(s.status) }}
-        </span>
-        <span>寫入 {{ s.successRows.toLocaleString() }} 行（來源 {{ s.totalRows.toLocaleString() }} 行）</span>
-        <span [class.text-vs-error]="s.errorRows > 0">錯誤 {{ s.errorRows.toLocaleString() }}</span>
-        <span class="text-vs-muted">{{ (s.elapsedMs / 1000).toFixed(1) }}s</span>
-      </div>
-      @if (s.failure) {
-        <p class="mt-1 text-vs-error">{{ s.failure }}</p>
-      }
-      @for (e of s.errors.slice(0, 50); track $index) {
-        <p class="text-vs-muted">第 {{ e.row }} 行 [{{ e.column }}] {{ e.reason }}</p>
-      }
-      @if (s.errors.length > 50) {
-        <p class="text-vs-muted">…其餘 {{ s.errors.length - 50 }} 筆省略</p>
-      }
-    }
-  </div>
 </div>

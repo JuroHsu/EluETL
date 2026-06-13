@@ -13,6 +13,7 @@ import { RouterLink, RouterLinkActive, RouterOutlet } from "@angular/router";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import { LogService } from "./services/log.service";
+import { OutputService } from "./services/output.service";
 import { WorkspaceService } from "./services/workspace.service";
 
 @Component({
@@ -24,8 +25,8 @@ import { WorkspaceService } from "./services/workspace.service";
 export class AppComponent implements OnInit {
   readonly ws = inject(WorkspaceService);
   readonly log = inject(LogService);
+  readonly output = inject(OutputService);
 
-  readonly panelOpen = signal(true);
   /** 「資訊」視窗開關 */
   readonly infoOpen = signal(false);
   readonly version = "0.1.0";
@@ -57,6 +58,21 @@ export class AppComponent implements OnInit {
 
   timeOf(d: Date): string {
     return d.toLocaleTimeString("zh-TW", { hour12: false });
+  }
+
+  /** 清除目前分頁的內容。 */
+  clearActive(): void {
+    switch (this.output.activeTab()) {
+      case "log":
+        this.log.clear();
+        break;
+      case "diagnostics":
+        this.output.clearDiagnostics();
+        break;
+      case "result":
+        this.output.clearResult();
+        break;
+    }
   }
 
   /** 以系統預設瀏覽器開啟外部連結（Tauri opener 插件）。 */
