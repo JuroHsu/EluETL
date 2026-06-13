@@ -61,15 +61,39 @@
       </label>
       <label>
         <span class="vs-label">類型</span>
-        <select formControlName="kind" class="vs-input w-full">
+        <select formControlName="kind" (change)="onKindChange()" class="vs-input w-full">
           <option value="file">檔案來源（Excel / CSV）</option>
           <option value="sqlserver">SQL Server</option>
           <option value="postgres">PostgreSQL</option>
           <option value="mysql">MySQL</option>
           <option value="sqlite">SQLite</option>
+          <option value="db2">IBM DB2</option>
         </select>
       </label>
     </div>
+
+    @if (isDb2 && db2Driver(); as d) {
+      @if (!d.available) {
+        <div class="rounded border border-vs-warn/40 bg-vs-warn/10 p-3 text-[12px] text-vs-text">
+          <div class="mb-1 font-medium text-vs-warn">⚠ 尚未偵測到 IBM DB2 驅動</div>
+          <p class="text-vs-muted">{{ d.message }}</p>
+          <p class="mt-1.5">
+            IBM DB2 非純 Rust 驅動，連線需安裝
+            <a
+              [href]="d.downloadUrl"
+              target="_blank"
+              rel="noopener"
+              class="text-vs-accent underline hover:text-white"
+            >IBM Data Server Driver（clidriver）</a>。安裝後設定 <code class="text-vs-text">IBM_DB_HOME</code>
+            環境變數並重新啟動本程式。
+          </p>
+        </div>
+      } @else {
+        <div class="rounded border border-vs-success/40 bg-vs-success/10 p-2 text-[12px] text-vs-success">
+          ✓ IBM DB2 驅動已就緒
+        </div>
+      }
+    }
 
     @if (isDbWithAuth) {
       <div class="grid grid-cols-3 gap-3">

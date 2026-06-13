@@ -45,7 +45,7 @@ pub async fn save_connection(
     if let Some(pw) = password {
         if matches!(
             config.kind,
-            DbKind::SqlServer | DbKind::Postgres | DbKind::MySql
+            DbKind::SqlServer | DbKind::Postgres | DbKind::MySql | DbKind::Db2
         ) {
             let id = config.id;
             tokio::task::spawn_blocking(move || keychain::save_password(&id, &pw)).await??;
@@ -62,6 +62,13 @@ pub async fn list_connections(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<ConnectionConfig>, EluEtlError> {
     state.store()?.list_connections().await
+}
+
+/// 偵測 IBM DB2 驅動就緒狀態（前端選擇 DB2 時呼叫）。
+/// 未就緒時前端據此顯示安裝提示與下載連結。
+#[tauri::command]
+pub fn check_db2_driver() -> db::db2::Db2DriverStatus {
+    db::db2::status()
 }
 
 #[tauri::command]
@@ -146,6 +153,63 @@ pub async fn query_preview(
             .iter()
             .map(|r| r.iter().map(|c| c.to_json()).collect())
             .collect(),
+    })
+}
+
+/// 資料庫來源預覽（「匯入資料」頁）：指定資料表（SELECT *）或自訂 SQL，
+/// 取前 100 行 + 型別推斷。`query` 為實際採用的 SQL（前端存入任務設定 / 腳本產生）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbSourcePreview {
+    pub columns: Vec<crate::commands::excel::ColumnPreview>,
+    pub rows: Vec<Vec<serde_json::Value>>,
+    pub query: String,
+}
+
+#[tauri::command]
+pub async fn read_db_source_preview(
+    state: tauri::State<'_, AppState>,
+    conn_id: Uuid,
+    table: Option<String>,
+    query: Option<String>,
+) -> Result<DbSourcePreview, EluEtlError> {
+    let conn = state.store()?.get_connection(&conn_id).await?;
+    let sql = match (table, query) {
+        (Some(t), None) => format!(
+            "SELECT * FROM {}",
+            db::quote_table(db::dialect_for(conn.kind)?, &t)?
+        ),
+        (None, Some(q)) => q,
+        _ => {
+            return Err(EluEtlError::Config(
+                "請指定資料表或 SQL 查詢（擇一）".into(),
+            ))
+        }
+    };
+    let result = state
+        .get_or_create_driver(conn_id)
+        .await?
+        .query_all(&sql, Some(100))
+        .await?;
+    let inferred = crate::excel::schema_infer::infer_types(&result.rows, 100);
+    let columns = result
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(i, name)| crate::commands::excel::ColumnPreview {
+            index: i,
+            name: name.clone(),
+            inferred_type: inferred.get(i).copied().flatten(),
+        })
+        .collect();
+    Ok(DbSourcePreview {
+        columns,
+        rows: result
+            .rows
+            .iter()
+            .map(|r| r.iter().map(|c| c.to_json()).collect())
+            .collect(),
+        query: sql,
     })
 }
 

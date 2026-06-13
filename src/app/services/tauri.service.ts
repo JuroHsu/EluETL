@@ -1,7 +1,7 @@
 import { Injectable } from "@angular/core";
 import { Channel, invoke } from "@tauri-apps/api/core";
 
-export type DbKind = "sqlserver" | "postgres" | "mysql" | "sqlite" | "file";
+export type DbKind = "sqlserver" | "postgres" | "mysql" | "sqlite" | "db2" | "file";
 export type DataType = "integer" | "float" | "text" | "bool" | "datetime" | "date";
 export type NullPolicy = "allow" | "error";
 
@@ -27,6 +27,20 @@ export interface ConnectionConfig {
 export interface TableInfo {
   schema: string | null;
   name: string;
+}
+
+/** 對應 Rust `Db2DriverStatus`：IBM DB2 驅動就緒狀態。 */
+export interface Db2DriverStatus {
+  /** 真正可連線（本版本含 db2 feature 且系統偵測到 IBM 驅動）。 */
+  available: boolean;
+  /** 本版本是否以 db2 feature 編譯。 */
+  featureBuilt: boolean;
+  /** 是否在系統環境偵測到 IBM Data Server Driver。 */
+  driverPresent: boolean;
+  /** 人類可讀說明。 */
+  message: string;
+  /** 驅動下載頁。 */
+  downloadUrl: string;
 }
 
 export interface ColumnInfo {
@@ -65,13 +79,15 @@ export type ErrorPolicy =
   | { policy: "abortOnFirst" }
   | { policy: "abortOnErrorRate"; maxPercent: number };
 
+/** ETL 來源：檔案（Excel / CSV）或資料庫查詢（對應 Rust `SourceSpec`）。 */
+export type SourceSpec =
+  | { type: "file"; path: string; sheet: string; hasHeader: boolean; encoding: string | null }
+  | { type: "database"; connId: string; query: string };
+
 export interface EtlJobConfig {
   jobId: string;
   connId: string;
-  sourcePath: string;
-  sheet: string;
-  hasHeader: boolean;
-  encoding: string | null;
+  source: SourceSpec;
   targetTable: string;
   rules: MappingRule[];
   writeMode: WriteMode;
@@ -121,7 +137,48 @@ export interface ScriptCheck {
   issues: ScriptIssue[];
 }
 
-/** 腳本任務參數：來源/目標可省略（腳本 SOURCE/TARGET 標頭優先）。 */
+// ---- 結構化腳本模型（「遷移作業」頁視覺編輯器；對應 Rust ScriptModel）----
+
+export interface ColRefModel {
+  prefix: string[];
+  column: string;
+}
+
+export type ExprModel =
+  | { kind: "col"; prefix: string[]; column: string }
+  | { kind: "text"; value: string }
+  | { kind: "int"; value: number }
+  | { kind: "float"; value: number }
+  | { kind: "bool"; value: boolean }
+  | { kind: "null" }
+  | { kind: "gen"; name: string }
+  | { kind: "concat"; expr: string };
+
+export interface ScriptWorkModel {
+  name: string | null;
+  condition: { left: ColRefModel; right: ColRefModel } | null;
+  targetTable: string[];
+  assignments: { targetColumn: string; value: ExprModel }[];
+}
+
+export type ScriptSourceModel =
+  | {
+      type: "file";
+      path: string;
+      sheet: string | null;
+      encoding: string | null;
+      hasHeader: boolean | null;
+    }
+  | { type: "connection"; name: string; table: string | null; query: string | null };
+
+export interface ScriptModel {
+  source: ScriptSourceModel | null;
+  targetConnection: string | null;
+  works: ScriptWorkModel[];
+}
+
+/** 腳本任務參數：來源/目標可省略（腳本 SOURCE/TARGET 標頭優先）。
+ *  工作區來源為資料庫時改傳 sourceConnId + sourceQuery。 */
 export interface ScriptJobParams {
   jobId: string;
   connId: string | null;
@@ -129,8 +186,17 @@ export interface ScriptJobParams {
   sheet: string | null;
   hasHeader: boolean | null;
   encoding: string | null;
+  sourceConnId: string | null;
+  sourceQuery: string | null;
   batchSize: number;
   script: string;
+}
+
+/** 資料庫來源預覽：query 為實際採用的 SQL（存入任務設定 / 腳本產生）。 */
+export interface DbSourcePreview {
+  columns: ColumnPreview[];
+  rows: unknown[][];
+  query: string;
 }
 
 /** 對應 Rust `EluEtlError` 的序列化格式。 */
@@ -161,6 +227,11 @@ export class TauriService {
 
   listConnections(): Promise<ConnectionConfig[]> {
     return invoke<ConnectionConfig[]>("list_connections");
+  }
+
+  /** 偵測 IBM DB2 驅動就緒狀態（選擇 DB2 連線類型時呼叫）。 */
+  checkDb2Driver(): Promise<Db2DriverStatus> {
+    return invoke<Db2DriverStatus>("check_db2_driver");
   }
 
   deleteConnection(connId: string): Promise<void> {
@@ -204,6 +275,15 @@ export class TauriService {
     return invoke<SourcePreview>("read_preview", { path, sheet, hasHeader, encoding });
   }
 
+  /** 資料庫來源預覽：指定資料表（SELECT *）或自訂 SQL（擇一）。 */
+  readDbSourcePreview(
+    connId: string,
+    table: string | null,
+    query: string | null,
+  ): Promise<DbSourcePreview> {
+    return invoke<DbSourcePreview>("read_db_source_preview", { connId, table, query });
+  }
+
   // ---- ETL ----
 
   executeEtl(
@@ -235,6 +315,11 @@ export class TauriService {
     sourceColumns: string[] | null,
   ): Promise<ScriptCheck> {
     return invoke<ScriptCheck>("validate_etl_script", { script, sourceColumns });
+  }
+
+  /** 解析腳本為結構化模型（遷移作業頁的視覺編輯器）。 */
+  parseEtlScript(script: string): Promise<ScriptModel> {
+    return invoke<ScriptModel>("parse_etl_script", { script });
   }
 
   executeEtlScript(

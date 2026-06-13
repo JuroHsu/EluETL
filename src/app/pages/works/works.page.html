@@ -1,0 +1,319 @@
+<div class="flex h-full flex-col">
+  <!-- 工具列（沿用 ETL 腳本頁 + 切換文字編輯） -->
+  <div class="flex h-10 shrink-0 items-center gap-3 border-b border-vs-border px-3">
+    <span class="vs-section">遷移作業</span>
+    <span class="text-xs text-vs-text">{{ etlFileName() }}</span>
+
+    <button type="button" (click)="openFile()" class="vs-btn-secondary h-6">開啟…</button>
+    <button type="button" (click)="saveFile()" class="vs-btn-secondary h-6">儲存</button>
+
+    <span class="max-w-80 truncate text-[11px] text-vs-muted">
+      @if (scriptSourceLabel(); as src) {
+        腳本來源：{{ src }}
+      } @else {
+        無腳本來源 — 腳本需含 SOURCE = FILE(...) 或 CONNECTION(...)
+      }
+    </span>
+
+    <div class="ml-auto flex items-center gap-2">
+      <button type="button" (click)="insertSample()" class="vs-btn-secondary h-6">插入範例</button>
+      <button type="button" (click)="validate()" class="vs-btn-secondary h-6">驗證</button>
+      @if (running()) {
+        <button type="button" (click)="cancel()" class="vs-btn-danger h-6">取消</button>
+      }
+      <button type="button" (click)="run()" [disabled]="!canRun()" class="vs-btn h-6">
+        {{ running() ? "執行中…" : "▶ 執行" }}
+      </button>
+      <button type="button" (click)="toggleTextMode()" class="vs-btn-secondary h-6">
+        {{ textMode() ? "切換視覺編輯" : "切換文字編輯" }}
+      </button>
+    </div>
+  </div>
+
+  <!-- 文字模式：CodeMirror 編輯器（常駐 DOM，隱藏切換） -->
+  <div #editorHost class="min-h-0 flex-1 overflow-hidden" [class.hidden]="!textMode()"></div>
+
+  <!-- 視覺模式：工作項目 / 判斷邏輯 / 執行作業 -->
+  @if (!textMode()) {
+    <div class="flex min-h-0 flex-1">
+      <!-- 左：工作項目 -->
+      <aside class="flex w-52 shrink-0 flex-col border-r border-vs-border">
+        <div class="flex h-8 shrink-0 items-center justify-between px-2">
+          <span class="text-[11px] tracking-widest text-vs-muted uppercase">工作項目</span>
+          <button type="button" (click)="addWork()" title="新增作業" class="vs-btn-secondary h-5 px-1.5 text-xs">
+            ＋ 新增
+          </button>
+        </div>
+        <div class="min-h-0 flex-1 overflow-auto">
+          @for (w of works(); track $index; let i = $index) {
+            <div
+              (click)="selectWork(i)"
+              class="group flex cursor-pointer items-center justify-between gap-1 border-l-2 px-2 py-1.5 text-xs"
+              [class.border-vs-accent]="i === selected()"
+              [class.bg-vs-input]="i === selected()"
+              [class.border-transparent]="i !== selected()"
+              [class.text-vs-muted]="i !== selected()"
+            >
+              <span class="truncate">{{ w.name || "（未命名）" }}</span>
+              <button
+                type="button"
+                (click)="removeWork(i); $event.stopPropagation()"
+                title="刪除作業"
+                class="hidden shrink-0 text-vs-muted group-hover:block hover:text-vs-error"
+              >
+                ✕
+              </button>
+            </div>
+          } @empty {
+            <p class="px-2 py-2 text-[11px] text-vs-muted">尚無工作項目，按「＋ 新增」開始。</p>
+          }
+        </div>
+      </aside>
+
+      @if (selectedWork(); as w) {
+        <!-- 中：判斷邏輯 -->
+        <section class="flex w-80 shrink-0 flex-col gap-3 overflow-auto border-r border-vs-border p-3">
+          <span class="text-[11px] tracking-widest text-vs-muted uppercase">判斷邏輯</span>
+
+          <label class="flex flex-col gap-1 text-[11px] text-vs-muted">
+            作業名稱
+            <input [(ngModel)]="w.name" (ngModelChange)="worksChanged()" class="vs-input h-6 text-xs" />
+          </label>
+
+          <label class="flex items-center gap-1.5 text-[11px] text-vs-muted">
+            <input type="checkbox" [(ngModel)]="w.useCondition" class="accent-vs-accent" />
+            啟用比對（IF 命中才寫入，未命中進錯誤報告）
+          </label>
+
+          @if (w.useCondition) {
+            <label class="flex flex-col gap-1 text-[11px] text-vs-muted">
+              來源欄位
+              <input
+                [(ngModel)]="w.condSourceColumn"
+                list="works-src-columns"
+                placeholder="email"
+                class="vs-input h-6 text-xs"
+              />
+            </label>
+
+            <div class="text-center text-xs text-vs-muted">==</div>
+
+            <label class="flex flex-col gap-1 text-[11px] text-vs-muted">
+              比對資料表（目標資料庫）
+              <input
+                [(ngModel)]="w.condTable"
+                (change)="refreshLookupColumns()"
+                list="works-db-tables"
+                placeholder="dbo.DirectoryAccounts"
+                class="vs-input h-6 text-xs"
+              />
+            </label>
+
+            <label class="flex flex-col gap-1 text-[11px] text-vs-muted">
+              比對欄位
+              <input
+                [(ngModel)]="w.condColumn"
+                list="works-lookup-columns"
+                placeholder="email"
+                class="vs-input h-6 text-xs"
+              />
+            </label>
+
+            <p class="text-[11px] leading-4 text-vs-muted">
+              比對為 hash lookup，文字不分大小寫；命中列可在右側以「比對表欄位」取值。
+            </p>
+          } @else {
+            <p class="text-[11px] leading-4 text-vs-muted">
+              未啟用比對：來源每一行都會寫入目標資料表。
+            </p>
+          }
+        </section>
+
+        <!-- 右：執行作業 -->
+        <section class="flex min-w-0 flex-1 flex-col gap-2 overflow-auto p-3">
+          <div class="flex items-center gap-2">
+            <span class="text-[11px] tracking-widest text-vs-muted uppercase">執行作業</span>
+            <div class="ml-auto flex items-center gap-2">
+              <button
+                type="button"
+                (click)="autoMatch()"
+                [disabled]="!w.targetTable || !state.preview()"
+                title="以欄名自動對應來源欄位（需先於「匯入資料」載入來源）"
+                class="vs-btn-secondary h-6"
+              >
+                自動對應
+              </button>
+              <button type="button" (click)="addAssign(w)" class="vs-btn-secondary h-6">＋ 新增欄位</button>
+            </div>
+          </div>
+
+          <label class="flex items-center gap-1.5 text-[11px] text-vs-muted">
+            目標資料表
+            <input
+              [(ngModel)]="w.targetTable"
+              (change)="refreshTargetColumns()"
+              list="works-db-tables"
+              placeholder="dbo.ExternalIdentityMappings"
+              class="vs-input h-6 min-w-56 text-xs"
+            />
+            <span>ADD（新增列）</span>
+          </label>
+
+          <table class="vs-table">
+            <thead>
+              <tr>
+                <th>目標欄位</th>
+                <th>值來源</th>
+                <th>值</th>
+                <th class="w-8"></th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (a of w.assigns; track $index; let i = $index) {
+                <tr>
+                  <td>
+                    <input [(ngModel)]="a.targetColumn" list="works-target-columns" class="vs-input h-6 w-44 text-xs" />
+                  </td>
+                  <td>
+                    <select
+                      [ngModel]="a.kind"
+                      (ngModelChange)="onAssignKindChange(a, $event)"
+                      class="vs-input h-6 text-xs"
+                    >
+                      <option value="source">來源欄位</option>
+                      <option value="lookup" [disabled]="!w.useCondition">比對表欄位</option>
+                      <option value="literal">常值</option>
+                      <option value="gen">生成</option>
+                      <option value="concat">合成欄位</option>
+                    </select>
+                  </td>
+                  <td>
+                    @if (a.kind === "gen") {
+                      <select [(ngModel)]="a.value" class="vs-input h-6 w-56 text-xs">
+                        @for (g of generators; track g.value) {
+                          <option [value]="g.value">{{ g.label }}</option>
+                        }
+                      </select>
+                    } @else if (a.kind === "concat") {
+                      <input
+                        [(ngModel)]="a.value"
+                        placeholder="N'前綴:' + [SOURCE].[欄位] 或 [比對表].[欄位] + N'@尾碼'"
+                        spellcheck="false"
+                        class="vs-input h-6 w-full min-w-72 font-mono text-xs"
+                        title="以 + 串接常值、來源欄位、比對表欄位與 Gen 產生器；NULL 視為空字串"
+                      />
+                    } @else {
+                      <input
+                        [(ngModel)]="a.value"
+                        [attr.list]="
+                          a.kind === 'source'
+                            ? 'works-src-columns'
+                            : a.kind === 'lookup'
+                              ? 'works-lookup-columns'
+                              : null
+                        "
+                        [placeholder]="a.kind === 'literal' ? '常值（如 123、TRUE、NULL 或文字）' : '欄位名稱'"
+                        class="vs-input h-6 w-56 text-xs"
+                      />
+                    }
+                  </td>
+                  <td>
+                    <button
+                      type="button"
+                      (click)="removeAssign(w, i)"
+                      title="刪除"
+                      class="text-vs-muted hover:text-vs-error"
+                    >
+                      ✕
+                    </button>
+                  </td>
+                </tr>
+              } @empty {
+                <tr>
+                  <td colspan="4" class="text-[11px] text-vs-muted">尚無欄位指派，按「＋ 新增欄位」或「自動對應」。</td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </section>
+      } @else {
+        <div class="flex flex-1 items-center justify-center">
+          <p class="text-sm text-vs-muted">選擇左側工作項目，或按「＋ 新增」建立第一個遷移作業。</p>
+        </div>
+      }
+    </div>
+
+    <!-- 共用 datalist（視覺模式輸入建議） -->
+    <datalist id="works-src-columns">
+      @for (name of sourceColumnNames(); track name) {
+        <option [value]="name"></option>
+      }
+    </datalist>
+    <datalist id="works-db-tables">
+      @for (t of tables(); track tableKey(t)) {
+        <option [value]="tableKey(t)"></option>
+      }
+    </datalist>
+    <datalist id="works-target-columns">
+      @for (c of targetColumns(); track c.name) {
+        <option [value]="c.name">{{ c.dbType }}</option>
+      }
+    </datalist>
+    <datalist id="works-lookup-columns">
+      @for (c of lookupColumns(); track c.name) {
+        <option [value]="c.name">{{ c.dbType }}</option>
+      }
+    </datalist>
+  }
+
+  <!-- 診斷 / 進度 / 結果 -->
+  <div class="max-h-48 shrink-0 overflow-auto border-t border-vs-border px-3 py-2 text-xs">
+    @if (checkMessage(); as msg) {
+      <p class="text-vs-success">✓ {{ msg }}</p>
+    }
+    @for (issue of issues(); track $index) {
+      <p class="text-vs-error">✕ 第 {{ issue.line }} 行：{{ issue.message }}</p>
+    }
+    @if (error(); as err) {
+      <p class="text-vs-error">{{ err }}</p>
+    }
+
+    @if (running() && progress(); as p) {
+      <div class="mt-1 flex items-center gap-3">
+        <div class="h-1 w-48 overflow-hidden rounded-full bg-vs-input">
+          <div
+            class="h-full bg-vs-accent transition-all"
+            [style.width.%]="p.totalBatches ? (p.batch / p.totalBatches) * 100 : 0"
+          ></div>
+        </div>
+        <span class="text-vs-muted">
+          {{ p.phase }} — 批次 {{ p.batch }}/{{ p.totalBatches }} · 寫入 {{ p.successRows.toLocaleString() }}
+        </span>
+      </div>
+    }
+
+    @if (summary(); as s) {
+      <div class="mt-1 flex items-center gap-5">
+        <span
+          class="font-semibold"
+          [class.text-vs-success]="s.status === 'completed'"
+          [class.text-vs-error]="s.status !== 'completed'"
+        >
+          {{ statusLabel(s.status) }}
+        </span>
+        <span>寫入 {{ s.successRows.toLocaleString() }} 行（來源 {{ s.totalRows.toLocaleString() }} 行）</span>
+        <span [class.text-vs-error]="s.errorRows > 0">錯誤 {{ s.errorRows.toLocaleString() }}</span>
+        <span class="text-vs-muted">{{ (s.elapsedMs / 1000).toFixed(1) }}s</span>
+      </div>
+      @if (s.failure) {
+        <p class="mt-1 text-vs-error">{{ s.failure }}</p>
+      }
+      @for (e of s.errors.slice(0, 50); track $index) {
+        <p class="text-vs-muted">第 {{ e.row }} 行 [{{ e.column }}] {{ e.reason }}</p>
+      }
+      @if (s.errors.length > 50) {
+        <p class="text-vs-muted">…其餘 {{ s.errors.length - 50 }} 筆省略</p>
+      }
+    }
+  </div>
+</div>

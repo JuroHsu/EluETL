@@ -10,6 +10,7 @@ import {
 } from "@angular/core";
 import { FormsModule } from "@angular/forms";
 import { RouterLink, RouterLinkActive, RouterOutlet } from "@angular/router";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 import { LogService } from "./services/log.service";
 import { WorkspaceService } from "./services/workspace.service";
@@ -18,12 +19,16 @@ import { WorkspaceService } from "./services/workspace.service";
   selector: "app-root",
   imports: [RouterOutlet, RouterLink, RouterLinkActive, FormsModule],
   templateUrl: "./app.component.html",
+  host: { "(document:keydown.escape)": "infoOpen.set(false)" },
 })
 export class AppComponent implements OnInit {
   readonly ws = inject(WorkspaceService);
   readonly log = inject(LogService);
 
   readonly panelOpen = signal(true);
+  /** 「資訊」視窗開關 */
+  readonly infoOpen = signal(false);
+  readonly version = "0.1.0";
   private readonly logBox = viewChild<ElementRef<HTMLElement>>("logBox");
 
   constructor() {
@@ -52,5 +57,14 @@ export class AppComponent implements OnInit {
 
   timeOf(d: Date): string {
     return d.toLocaleTimeString("zh-TW", { hour12: false });
+  }
+
+  /** 以系統預設瀏覽器開啟外部連結（Tauri opener 插件）。 */
+  async openExternal(url: string): Promise<void> {
+    try {
+      await openUrl(url);
+    } catch (e) {
+      this.log.error("資訊", `無法開啟連結：${String(e)}`);
+    }
   }
 }

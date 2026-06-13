@@ -5,10 +5,11 @@ use uuid::Uuid;
 use crate::db;
 use crate::db::pool::AppState;
 use crate::etl::executor::{self, EtlProgress, EtlSummary};
-use crate::etl::mapping::EtlJobConfig;
-use crate::etl::script::ast::{Expr, ScriptHeader, ScriptIssue, SourceDecl};
-use crate::etl::script::executor::{ResolvedScriptJob, ScriptJobParams};
+use crate::etl::mapping::{EtlJobConfig, SourceSpec};
+use crate::etl::script::ast::{ColRef, Expr, ScriptHeader, ScriptIssue, SourceDecl, Statement};
+use crate::etl::script::executor::{ResolvedScriptJob, ScriptJobParams, ScriptSource};
 use crate::etl::script::{self, parser};
+use crate::etl::source_input;
 use crate::models::connection::{ConnectionConfig, DbKind};
 use crate::models::errors::EluEtlError;
 
@@ -73,7 +74,7 @@ pub fn validate_etl_script(script: String, source_columns: Option<Vec<String>>) 
             if !lower.contains(&name.to_lowercase()) {
                 issues.push(ScriptIssue {
                     line,
-                    message: format!("來源檔沒有欄位 {name}（可用：{}）", cols.join(", ")),
+                    message: format!("來源沒有欄位 {name}（可用：{}）", cols.join(", ")),
                 });
             }
         };
@@ -86,7 +87,7 @@ pub fn validate_etl_script(script: String, source_columns: Option<Vec<String>>) 
                 None => (String::new(), None),
             };
             for a in &stmt.assignments {
-                if let Expr::Col(r) = &a.value {
+                for r in a.value.col_refs() {
                     let key = r.prefix_key();
                     let is_lookup = lookup_prefix.as_deref() == Some(key.as_str());
                     if !is_lookup
@@ -103,6 +104,187 @@ pub fn validate_etl_script(script: String, source_columns: Option<Vec<String>>) 
         ok: issues.is_empty(),
         statement_count: parsed.statements.len(),
         issues,
+    }
+}
+
+// ---- 結構化腳本模型（「遷移作業」頁的視覺化編輯器） ----
+
+/// 欄位參照：prefix 為 0..3 段（[dbo].[Account].Id → prefix=["dbo","Account"]）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColRefModel {
+    pub prefix: Vec<String>,
+    pub column: String,
+}
+
+impl From<&ColRef> for ColRefModel {
+    fn from(r: &ColRef) -> Self {
+        ColRefModel {
+            prefix: r.prefix.clone(),
+            column: r.column.clone(),
+        }
+    }
+}
+
+/// 指派值（discriminated union，前端依 kind 分流）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ExprModel {
+    Col {
+        prefix: Vec<String>,
+        column: String,
+    },
+    Text {
+        value: String,
+    },
+    Int {
+        value: i64,
+    },
+    Float {
+        value: f64,
+    },
+    Bool {
+        value: bool,
+    },
+    Null,
+    /// 產生器；name 為正規名稱（如 "ULID"、"GUID(Text)"）
+    Gen {
+        name: String,
+    },
+    /// 合成欄位；expr 為正規 DSL 文字（如 `N'前綴:' + [SOURCE].[Name]`）
+    Concat {
+        expr: String,
+    },
+}
+
+impl From<&Expr> for ExprModel {
+    fn from(e: &Expr) -> Self {
+        match e {
+            Expr::Col(r) => ExprModel::Col {
+                prefix: r.prefix.clone(),
+                column: r.column.clone(),
+            },
+            Expr::Text(s) => ExprModel::Text { value: s.clone() },
+            Expr::Int(v) => ExprModel::Int { value: *v },
+            Expr::Float(v) => ExprModel::Float { value: *v },
+            Expr::Bool(v) => ExprModel::Bool { value: *v },
+            Expr::Null => ExprModel::Null,
+            Expr::Gen(k) => ExprModel::Gen {
+                name: k.label().to_string(),
+            },
+            Expr::Concat(_) => ExprModel::Concat { expr: e.to_dsl() },
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConditionModel {
+    pub left: ColRefModel,
+    pub right: ColRefModel,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignmentModel {
+    pub target_column: String,
+    pub value: ExprModel,
+}
+
+/// 單一工作項目（WORK 區塊或舊式裸陳述式）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkModel {
+    pub name: Option<String>,
+    pub condition: Option<ConditionModel>,
+    /// 目標資料表的各段（前端以 `.` 連接顯示）
+    pub target_table: Vec<String>,
+    pub assignments: Vec<AssignmentModel>,
+}
+
+impl From<&Statement> for WorkModel {
+    fn from(s: &Statement) -> Self {
+        WorkModel {
+            name: s.name.clone(),
+            condition: s.condition.as_ref().map(|c| ConditionModel {
+                left: (&c.left).into(),
+                right: (&c.right).into(),
+            }),
+            target_table: s.target_table.clone(),
+            assignments: s
+                .assignments
+                .iter()
+                .map(|a| AssignmentModel {
+                    target_column: a.target_column.clone(),
+                    value: (&a.value).into(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// SOURCE 標頭（round-trip 用：視覺模式重新產生腳本時保留）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum SourceModel {
+    #[serde(rename_all = "camelCase")]
+    File {
+        path: String,
+        sheet: Option<String>,
+        encoding: Option<String>,
+        has_header: Option<bool>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Connection {
+        name: String,
+        table: Option<String>,
+        query: Option<String>,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptModel {
+    pub source: Option<SourceModel>,
+    pub target_connection: Option<String>,
+    pub works: Vec<WorkModel>,
+}
+
+/// 解析腳本為結構化模型，供「遷移作業」頁的三欄視覺編輯器使用。
+#[tauri::command]
+pub fn parse_etl_script(script: String) -> Result<ScriptModel, EluEtlError> {
+    let parsed = script::executor::run_blocking_parse(&script)?;
+    Ok(ScriptModel {
+        source: parsed.header.source.as_ref().map(|s| match s {
+            SourceDecl::File(f) => SourceModel::File {
+                path: f.path.clone(),
+                sheet: f.sheet.clone(),
+                encoding: f.encoding.clone(),
+                has_header: f.has_header,
+            },
+            SourceDecl::Connection(c) => SourceModel::Connection {
+                name: c.name.clone(),
+                table: c.table.clone(),
+                query: c.query.clone(),
+            },
+        }),
+        target_connection: parsed.header.target_connection.clone(),
+        works: parsed.statements.iter().map(WorkModel::from).collect(),
+    })
+}
+
+/// 工作表名稱解析：未指定時取第一個工作表（CSV 為 "CSV"）。
+async fn resolve_sheet(path: &str, sheet: Option<String>) -> Result<String, EluEtlError> {
+    match sheet {
+        Some(s) => Ok(s),
+        None => {
+            let p = path.to_string();
+            tokio::task::spawn_blocking(move || crate::excel::source::list_sheets(&p))
+                .await??
+                .into_iter()
+                .next()
+                .ok_or_else(|| EluEtlError::Excel("來源檔沒有工作表".into()))
+        }
     }
 }
 
@@ -136,49 +318,77 @@ async fn resolve_script_job(
         )));
     }
 
-    // 來源檔案
-    let (path, sheet_opt, encoding, has_header) = match &header.source {
-        Some(SourceDecl::File(f)) => (
-            f.path.clone(),
-            f.sheet.clone(),
-            f.encoding.clone(),
-            f.has_header,
-        ),
-        Some(SourceDecl::Connection(name)) => {
-            let c = store.get_connection_by_name(name).await?;
-            if c.kind != DbKind::File {
-                return Err(EluEtlError::Config(format!(
-                    "SOURCE 連線「{name}」不是檔案連線（資料庫作為來源尚未支援）"
-                )));
+    // 來源：檔案（inline / 檔案連線）或資料庫連線（TABLE / QUERY）
+    let source = match &header.source {
+        Some(SourceDecl::File(f)) => ScriptSource::File {
+            path: f.path.clone(),
+            sheet: resolve_sheet(&f.path, f.sheet.clone()).await?,
+            has_header: f.has_header.unwrap_or(true),
+            encoding: f.encoding.clone(),
+        },
+        Some(SourceDecl::Connection(c)) => {
+            let conn = store.get_connection_by_name(&c.name).await?;
+            if conn.kind == DbKind::File {
+                if c.table.is_some() || c.query.is_some() {
+                    return Err(EluEtlError::Config(format!(
+                        "「{}」是檔案連線，不支援 TABLE / QUERY 參數",
+                        conn.name
+                    )));
+                }
+                ScriptSource::File {
+                    sheet: resolve_sheet(&conn.database, conn.sheet.clone()).await?,
+                    path: conn.database,
+                    has_header: conn.has_header.unwrap_or(true),
+                    encoding: conn.encoding,
+                }
+            } else {
+                let query = match (&c.table, &c.query) {
+                    (Some(t), None) => format!(
+                        "SELECT * FROM {}",
+                        db::quote_table(db::dialect_for(conn.kind)?, t)?
+                    ),
+                    (None, Some(q)) => q.clone(),
+                    _ => {
+                        return Err(EluEtlError::Config(format!(
+                            "資料庫來源「{}」需指定 TABLE='schema.table' 或 \
+                             QUERY='SELECT ...'（擇一）",
+                            conn.name
+                        )))
+                    }
+                };
+                ScriptSource::Database {
+                    driver: state.get_or_create_driver(conn.id).await?,
+                    query,
+                }
             }
-            (c.database, c.sheet, c.encoding, c.has_header)
         }
+        // 工作區回退：「匯入資料」載入的資料庫查詢優先，否則檔案路徑
         None => {
-            let p = params.source_path.clone().ok_or_else(|| {
-                EluEtlError::Config(
-                    "未指定來源：請在腳本加入 SOURCE = FILE(PATH='...') 或 \
-                     SOURCE = CONNECTION('檔案連線名稱')，或先於「匯入資料」載入檔案"
-                        .into(),
-                )
-            })?;
-            (
-                p,
-                params.sheet.clone(),
-                params.encoding.clone(),
-                params.has_header,
-            )
-        }
-    };
-
-    let sheet = match sheet_opt {
-        Some(s) => s,
-        None => {
-            let p = path.clone();
-            tokio::task::spawn_blocking(move || crate::excel::source::list_sheets(&p))
-                .await??
-                .into_iter()
-                .next()
-                .ok_or_else(|| EluEtlError::Excel("來源檔沒有工作表".into()))?
+            if let Some(conn_id) = params.source_conn_id {
+                let query = params.source_query.clone().ok_or_else(|| {
+                    EluEtlError::Config(
+                        "資料庫來源缺少查詢：請先於「匯入資料」選擇資料表或執行 SQL 預覽".into(),
+                    )
+                })?;
+                ScriptSource::Database {
+                    driver: state.get_or_create_driver(conn_id).await?,
+                    query,
+                }
+            } else {
+                let p = params.source_path.clone().ok_or_else(|| {
+                    EluEtlError::Config(
+                        "未指定來源：請在腳本加入 SOURCE = FILE(PATH='...') 或 \
+                         SOURCE = CONNECTION('連線名稱')，或先於「匯入資料」載入來源"
+                            .into(),
+                    )
+                })?;
+                ScriptSource::File {
+                    sheet: resolve_sheet(&p, params.sheet.clone()).await?,
+                    path: p,
+                    has_header: params.has_header.unwrap_or(true),
+                    encoding: params.encoding.clone(),
+                }
+            }
         }
     };
 
@@ -186,10 +396,7 @@ async fn resolve_script_job(
         target,
         ResolvedScriptJob {
             job_id: params.job_id,
-            source_path: path,
-            sheet,
-            has_header: has_header.unwrap_or(true),
-            encoding,
+            source,
             batch_size: params.batch_size.max(1),
         },
     ))
@@ -212,7 +419,7 @@ pub async fn execute_etl_script(
         target: "audit",
         job_id = %job_id,
         target_conn = %target.name,
-        source = %resolved.source_path,
+        source = %resolved.source.label(),
         statements = parsed.statements.len(),
         "腳本任務開始"
     );
@@ -256,8 +463,14 @@ pub async fn resume_etl(
         )));
     }
 
-    let path = job_row.config.source_path.clone();
-    let current_sha = tokio::task::spawn_blocking(move || executor::file_sha256(&path)).await??;
+    if matches!(job_row.config.source, SourceSpec::Database { .. }) {
+        return Err(EluEtlError::Etl(
+            "資料庫來源無法保證資料列順序不變，不支援續跑；請重新執行任務".into(),
+        ));
+    }
+    let spec = job_row.config.source.clone();
+    let current_sha =
+        tokio::task::spawn_blocking(move || source_input::fingerprint(&spec)).await??;
     if current_sha != job_row.source_sha256 {
         return Err(EluEtlError::Etl(
             "來源檔內容已變更，無法安全續跑；請重新執行任務".into(),

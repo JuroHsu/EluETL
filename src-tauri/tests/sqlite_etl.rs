@@ -163,6 +163,94 @@ async fn sqlite_rejects_dangerous_table_name() {
 }
 
 #[tokio::test]
+async fn wizard_database_source_end_to_end() {
+    // 資料庫 → 資料庫：來源 SQLite 的 staging 表經型別轉換寫入另一個 SQLite
+    use elu_etl_lib::db::pool::AppState;
+    use elu_etl_lib::etl::executor;
+    use elu_etl_lib::etl::mapping::{ErrorPolicy, EtlJobConfig, SourceSpec, WriteMode};
+    use elu_etl_lib::state::store::StateStore;
+    use tokio_util::sync::CancellationToken;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::default();
+    state.set_store(StateStore::init(dir.path()).await.unwrap());
+
+    let src_path = dir.path().join("source.db");
+    std::fs::File::create(&src_path).unwrap();
+    let src_config = sqlite_config(src_path.to_str().unwrap());
+    state
+        .store()
+        .unwrap()
+        .upsert_connection(&src_config)
+        .await
+        .unwrap();
+
+    let dst_path = dir.path().join("target.db");
+    std::fs::File::create(&dst_path).unwrap();
+    let dst_config = sqlite_config(dst_path.to_str().unwrap());
+    state
+        .store()
+        .unwrap()
+        .upsert_connection(&dst_config)
+        .await
+        .unwrap();
+
+    let src_driver = state.get_or_create_driver(src_config.id).await.unwrap();
+    src_driver
+        .query_all("CREATE TABLE staging (code TEXT, amount TEXT)", None)
+        .await
+        .unwrap();
+    src_driver
+        .query_all(
+            "INSERT INTO staging (code, amount) VALUES ('1', '10.5'), ('x', '2')",
+            None,
+        )
+        .await
+        .unwrap();
+
+    let dst_driver = state.get_or_create_driver(dst_config.id).await.unwrap();
+    dst_driver
+        .query_all("CREATE TABLE target_rows (id INTEGER, amount REAL)", None)
+        .await
+        .unwrap();
+
+    let job = EtlJobConfig {
+        job_id: Uuid::new_v4(),
+        conn_id: dst_config.id,
+        source: SourceSpec::Database {
+            conn_id: src_config.id,
+            query: "SELECT code, amount FROM staging ORDER BY code".into(),
+        },
+        target_table: "target_rows".into(),
+        rules: vec![
+            rule(0, "code", "id", DataType::Integer, NullPolicy::Error),
+            rule(1, "amount", "amount", DataType::Float, NullPolicy::Allow),
+        ],
+        write_mode: WriteMode::BatchCommit,
+        error_policy: ErrorPolicy::SkipAndReport,
+        batch_size: 5000,
+    };
+
+    let summary = executor::run(&state, job, |_| {}, CancellationToken::new(), 0)
+        .await
+        .unwrap();
+    assert_eq!(summary.status, "completed");
+    assert_eq!(summary.total_rows, 2);
+    assert_eq!(summary.success_rows, 1); // 'x' 無法轉整數 → 錯誤報告
+    assert_eq!(summary.error_rows, 1);
+    assert_eq!(summary.errors[0].row, 2); // 資料庫來源行號自結果集第 1 行起算
+
+    let rows = dst_driver
+        .query_all("SELECT id, amount FROM target_rows", None)
+        .await
+        .unwrap()
+        .rows;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], CellValue::Int(1));
+    assert_eq!(rows[0][1], CellValue::Float(10.5));
+}
+
+#[tokio::test]
 async fn xlsx_export_roundtrip() {
     // 匯出 xlsx 後以 calamine 讀回驗證（writer ↔ reader golden 測試）
     let dir = tempfile::tempdir().unwrap();

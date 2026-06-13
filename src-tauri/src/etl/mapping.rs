@@ -50,17 +50,44 @@ fn default_batch_size() -> usize {
     5_000
 }
 
+/// ETL 來源：檔案（Excel / CSV）或資料庫查詢。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum SourceSpec {
+    /// 檔案來源（`sheet` 已解析為具體工作表名稱）
+    #[serde(rename_all = "camelCase")]
+    File {
+        path: String,
+        sheet: String,
+        has_header: bool,
+        #[serde(default)]
+        encoding: Option<String>,
+    },
+    /// 資料庫來源：以已儲存連線執行查詢（密碼留在 OS keychain）
+    #[serde(rename_all = "camelCase")]
+    Database { conn_id: Uuid, query: String },
+}
+
+impl SourceSpec {
+    /// 顯示用標籤（日誌 / 進度訊息）。
+    pub fn label(&self) -> String {
+        match self {
+            SourceSpec::File { path, .. } => std::path::Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.clone()),
+            SourceSpec::Database { query, .. } => format!("DB 查詢（{}）", query.trim()),
+        }
+    }
+}
+
 /// ETL 任務設定（前端組裝後跨 IPC 傳入；序列化存於 state.db 供續跑）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EtlJobConfig {
     pub job_id: Uuid,
     pub conn_id: Uuid,
-    pub source_path: String,
-    pub sheet: String,
-    pub has_header: bool,
-    #[serde(default)]
-    pub encoding: Option<String>,
+    pub source: SourceSpec,
     pub target_table: String,
     pub rules: Vec<MappingRule>,
     pub write_mode: WriteMode,

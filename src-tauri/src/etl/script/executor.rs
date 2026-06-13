@@ -10,9 +10,10 @@ use uuid::Uuid;
 use crate::db::driver::DbDriver;
 use crate::db::{quote_columns, quote_table, Dialect};
 use crate::etl::executor::{EtlProgress, EtlSummary};
-use crate::etl::script::ast::{Expr, Script};
+use crate::etl::script::ast::{Expr, GenKind, Script};
+use crate::etl::script::gen;
+use crate::etl::source_input;
 use crate::etl::transform::RowError;
-use crate::excel::source;
 use crate::models::errors::EluEtlError;
 use crate::models::value::{CellValue, DataType};
 
@@ -20,6 +21,7 @@ const ERROR_DETAIL_CAP: usize = 1_000;
 
 /// 腳本任務參數（IPC 傳入）。來源與目標皆為選擇性：
 /// 腳本標頭（SOURCE/TARGET）優先，否則回退到此處的工作區選擇。
+/// 工作區來源若為資料庫，以 `source_conn_id` + `source_query` 傳入。
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScriptJobParams {
@@ -34,6 +36,10 @@ pub struct ScriptJobParams {
     pub has_header: Option<bool>,
     #[serde(default)]
     pub encoding: Option<String>,
+    #[serde(default)]
+    pub source_conn_id: Option<Uuid>,
+    #[serde(default)]
+    pub source_query: Option<String>,
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
     pub script: String,
@@ -43,14 +49,36 @@ fn default_batch_size() -> usize {
     5_000
 }
 
+/// 解析完成的腳本來源：檔案，或已建好驅動的資料庫查詢。
+#[derive(Clone)]
+pub enum ScriptSource {
+    File {
+        path: String,
+        sheet: String,
+        has_header: bool,
+        encoding: Option<String>,
+    },
+    Database {
+        driver: Arc<dyn DbDriver>,
+        query: String,
+    },
+}
+
+impl ScriptSource {
+    /// audit 日誌用標籤（檔案路徑或查詢文字）。
+    pub fn label(&self) -> &str {
+        match self {
+            ScriptSource::File { path, .. } => path,
+            ScriptSource::Database { query, .. } => query,
+        }
+    }
+}
+
 /// 標頭 / 工作區解析完成後的具體任務（executor 的輸入）。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ResolvedScriptJob {
     pub job_id: Uuid,
-    pub source_path: String,
-    pub sheet: String,
-    pub has_header: bool,
-    pub encoding: Option<String>,
+    pub source: ScriptSource,
     pub batch_size: usize,
 }
 
@@ -59,6 +87,9 @@ enum Binding {
     Source(usize),
     Lookup(usize),
     Const(CellValue),
+    Gen(GenKind),
+    /// 合成欄位：各項求值後轉文字串接（NULL 視為空字串）
+    Concat(Vec<Binding>),
 }
 
 fn literal_to_cell(expr: &Expr) -> Option<CellValue> {
@@ -68,7 +99,86 @@ fn literal_to_cell(expr: &Expr) -> Option<CellValue> {
         Expr::Float(v) => Some(CellValue::Float(*v)),
         Expr::Bool(v) => Some(CellValue::Bool(*v)),
         Expr::Null => Some(CellValue::Null),
-        Expr::Col(_) => None,
+        Expr::Col(_) | Expr::Gen(_) | Expr::Concat(_) => None,
+    }
+}
+
+/// 將運算式繫結為執行期取值（合成欄位遞迴繫結各項）。
+struct BindContext<'a> {
+    source_prefix: &'a str,
+    lookup_prefix: Option<&'a str>,
+    lookup_cols: &'a [String],
+    col_index: &'a HashMap<String, usize>,
+    header: &'a [String],
+    has_condition: bool,
+}
+
+fn build_binding(expr: &Expr, ctx: &BindContext<'_>) -> Result<Binding, EluEtlError> {
+    if let Some(lit) = literal_to_cell(expr) {
+        return Ok(Binding::Const(lit));
+    }
+    match expr {
+        Expr::Gen(k) => Ok(Binding::Gen(*k)),
+        Expr::Concat(parts) => Ok(Binding::Concat(
+            parts
+                .iter()
+                .map(|p| build_binding(p, ctx))
+                .collect::<Result<_, _>>()?,
+        )),
+        Expr::Col(r) => {
+            let key = r.prefix_key();
+            if ctx.lookup_prefix == Some(key.as_str()) {
+                let pos = ctx
+                    .lookup_cols
+                    .iter()
+                    .position(|c| c.eq_ignore_ascii_case(&r.column))
+                    .expect("lookup 欄位已預先收集");
+                return Ok(Binding::Lookup(pos));
+            }
+            if key.is_empty() || key == ctx.source_prefix || !ctx.has_condition {
+                let idx = ctx.col_index.get(&r.column.to_lowercase()).ok_or_else(|| {
+                    EluEtlError::Etl(format!(
+                        "第 {} 行：來源沒有欄位 {}（可用欄位：{}）",
+                        r.line,
+                        r.column,
+                        ctx.header.join(", ")
+                    ))
+                })?;
+                return Ok(Binding::Source(*idx));
+            }
+            Err(EluEtlError::Etl(format!(
+                "第 {} 行：未知的資料來源前綴 [{}]（來源為 [{}]，比對表為 [{}]）",
+                r.line,
+                key,
+                ctx.source_prefix,
+                ctx.lookup_prefix.unwrap_or("-")
+            )))
+        }
+        _ => unreachable!("字面值已由 literal_to_cell 處理"),
+    }
+}
+
+/// 行迴圈內的取值（合成欄位遞迴求值）。
+fn eval_binding(
+    b: &Binding,
+    row: &[CellValue],
+    matched: Option<&Vec<CellValue>>,
+    gen_ctx: &gen::GenContext,
+) -> CellValue {
+    match b {
+        Binding::Const(v) => v.clone(),
+        Binding::Source(idx) => row.get(*idx).cloned().unwrap_or(CellValue::Null),
+        Binding::Lookup(pos) => matched
+            .and_then(|m| m.get(*pos))
+            .cloned()
+            .unwrap_or(CellValue::Null),
+        Binding::Gen(k) => gen::generate(*k, row, gen_ctx),
+        Binding::Concat(parts) => CellValue::Text(
+            parts
+                .iter()
+                .map(|p| eval_binding(p, row, matched, gen_ctx).to_display_string())
+                .collect::<String>(),
+        ),
     }
 }
 
@@ -121,32 +231,23 @@ where
 {
     let started = Instant::now();
 
-    // 讀取來源
+    // 讀取來源（檔案或資料庫查詢）
     emit(progress(&job, "read", 0, 0, 0, 0));
-    let mut rows = {
-        let (path, sheet, encoding) = (
-            job.source_path.clone(),
-            job.sheet.clone(),
-            job.encoding.clone(),
-        );
-        tokio::task::spawn_blocking(move || source::read_rows(&path, &sheet, encoding.as_deref()))
-            .await??
+    let data = match &job.source {
+        ScriptSource::File {
+            path,
+            sheet,
+            has_header,
+            encoding,
+        } => source_input::read_file(path, sheet, encoding.as_deref(), *has_header).await?,
+        ScriptSource::Database {
+            driver: src_driver,
+            query,
+        } => source_input::read_database(src_driver.clone(), query).await?,
     };
+    let (header, rows, first_data_row) = (data.header, data.rows, data.first_data_row);
 
     // 表頭 → 欄名索引（不分大小寫）
-    let header: Vec<String> = if job.has_header && !rows.is_empty() {
-        rows.remove(0)
-            .iter()
-            .enumerate()
-            .map(|(i, c)| match c {
-                CellValue::Text(s) if !s.is_empty() => s.clone(),
-                _ => format!("欄位{}", i + 1),
-            })
-            .collect()
-    } else {
-        let n = rows.iter().map(|r| r.len()).max().unwrap_or(0);
-        (0..n).map(|i| format!("欄位{}", i + 1)).collect()
-    };
     let col_index: HashMap<String, usize> = header
         .iter()
         .enumerate()
@@ -154,7 +255,8 @@ where
         .collect();
 
     let total_rows = rows.len() as u64;
-    let first_data_row = if job.has_header { 2 } else { 1 };
+    // 產生器情境：日期時間類在同一次執行內取相同時間戳
+    let gen_ctx = gen::GenContext::new();
     let batch_size = job.batch_size.max(1);
     let total_batches = rows.len().div_ceil(batch_size).max(1) * script.statements.len();
 
@@ -216,11 +318,11 @@ where
             .unwrap_or_default();
         let lookup_prefix = stmt.condition.as_ref().map(|c| c.right.prefix_key());
 
-        // 此陳述式引用到的 lookup 欄位（依出現順序，去重）
+        // 此陳述式引用到的 lookup 欄位（依出現順序，去重；含合成欄位內的參照）
         let mut lookup_cols: Vec<String> = Vec::new();
         if let Some(lp) = &lookup_prefix {
             for a in &stmt.assignments {
-                if let Expr::Col(r) = &a.value {
+                for r in a.value.col_refs() {
                     if &r.prefix_key() == lp
                         && !lookup_cols
                             .iter()
@@ -280,43 +382,18 @@ where
         };
 
         // ---- 指派值繫結 ----
+        let bind_ctx = BindContext {
+            source_prefix: &source_prefix,
+            lookup_prefix: lookup_prefix.as_deref(),
+            lookup_cols: &lookup_cols,
+            col_index: &col_index,
+            header: &header,
+            has_condition: stmt.condition.is_some(),
+        };
         let bindings: Vec<Binding> = stmt
             .assignments
             .iter()
-            .map(|a| -> Result<Binding, EluEtlError> {
-                if let Some(lit) = literal_to_cell(&a.value) {
-                    return Ok(Binding::Const(lit));
-                }
-                let Expr::Col(r) = &a.value else {
-                    unreachable!()
-                };
-                let key = r.prefix_key();
-                if lookup_prefix.as_deref() == Some(key.as_str()) {
-                    let pos = lookup_cols
-                        .iter()
-                        .position(|c| c.eq_ignore_ascii_case(&r.column))
-                        .expect("lookup 欄位已預先收集");
-                    return Ok(Binding::Lookup(pos));
-                }
-                if key.is_empty() || key == source_prefix || stmt.condition.is_none() {
-                    let idx = col_index.get(&r.column.to_lowercase()).ok_or_else(|| {
-                        EluEtlError::Etl(format!(
-                            "第 {} 行：來源檔沒有欄位 {}（可用欄位：{}）",
-                            r.line,
-                            r.column,
-                            header.join(", ")
-                        ))
-                    })?;
-                    return Ok(Binding::Source(*idx));
-                }
-                Err(EluEtlError::Etl(format!(
-                    "第 {} 行：未知的資料來源前綴 [{}]（來源為 [{}]，比對表為 [{}]）",
-                    r.line,
-                    key,
-                    source_prefix,
-                    lookup_prefix.as_deref().unwrap_or("-")
-                )))
-            })
+            .map(|a| build_binding(&a.value, &bind_ctx))
             .collect::<Result<_, _>>()?;
 
         let match_src_idx: Option<usize> = match &stmt.condition {
@@ -324,7 +401,7 @@ where
             Some(cond) => Some(*col_index.get(&cond.left.column.to_lowercase()).ok_or_else(
                 || {
                     EluEtlError::Etl(format!(
-                        "第 {} 行：來源檔沒有比對欄位 {}",
+                        "第 {} 行：來源沒有比對欄位 {}",
                         cond.line, cond.left.column
                     ))
                 },
@@ -370,14 +447,7 @@ where
 
             let mut out = Vec::with_capacity(bindings.len());
             for (b, (a, ty)) in bindings.iter().zip(stmt.assignments.iter().zip(&types)) {
-                let raw = match b {
-                    Binding::Const(v) => v.clone(),
-                    Binding::Source(idx) => row.get(*idx).cloned().unwrap_or(CellValue::Null),
-                    Binding::Lookup(pos) => matched
-                        .and_then(|m| m.get(*pos))
-                        .cloned()
-                        .unwrap_or(CellValue::Null),
-                };
+                let raw = eval_binding(b, row, matched, &gen_ctx);
                 match raw.convert_to(*ty) {
                     Ok(v) => out.push(v),
                     Err(reason) => {
@@ -453,10 +523,11 @@ where
         tracing::info!(
             target: "audit",
             job_id = %job.job_id,
+            work = stmt.name.as_deref().unwrap_or("-"),
             statement_line = stmt.line,
             table = %target,
             inserted = out_rows.len(),
-            "腳本陳述式完成"
+            "工作項目完成"
         );
     }
 

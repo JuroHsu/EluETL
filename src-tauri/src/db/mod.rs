@@ -1,3 +1,4 @@
+pub mod db2;
 pub mod driver;
 pub mod pool;
 
@@ -24,6 +25,22 @@ pub fn create_driver(
         DbKind::Postgres => Arc::new(postgres::PostgresDriver::new(config, password)),
         DbKind::MySql => Arc::new(mysql::MySqlDriver::new(config, password)),
         DbKind::Sqlite => Arc::new(sqlite::SqliteDriver::new(config)),
+        DbKind::Db2 => {
+            // DB2 非純 Rust 驅動：實作以 `db2` feature gate 隔離，預設建置不編譯。
+            #[cfg(feature = "db2")]
+            {
+                Arc::new(db2::Db2Driver::new(config, password))
+            }
+            #[cfg(not(feature = "db2"))]
+            {
+                let _ = password;
+                return Err(EluEtlError::Config(format!(
+                    "「{}」為 IBM DB2 連線，但此版本未編譯 DB2 支援。\
+                     請以 `cargo build --features db2` 重新建置，並安裝 IBM Data Server Driver。",
+                    config.name
+                )));
+            }
+        }
         DbKind::File => {
             return Err(EluEtlError::Config(format!(
                 "「{}」是檔案連線，僅能作為 ETL 來源，不能作為資料庫目標",
@@ -40,6 +57,7 @@ pub enum Dialect {
     Postgres,
     MySql,
     Sqlite,
+    Db2,
 }
 
 pub fn dialect_for(kind: DbKind) -> Result<Dialect, EluEtlError> {
@@ -48,6 +66,7 @@ pub fn dialect_for(kind: DbKind) -> Result<Dialect, EluEtlError> {
         DbKind::Postgres => Ok(Dialect::Postgres),
         DbKind::MySql => Ok(Dialect::MySql),
         DbKind::Sqlite => Ok(Dialect::Sqlite),
+        DbKind::Db2 => Ok(Dialect::Db2),
         DbKind::File => Err(EluEtlError::Config("檔案連線沒有 SQL 方言".into())),
     }
 }
@@ -68,7 +87,7 @@ pub fn validate_ident(name: &str) -> Result<(), EluEtlError> {
 fn quote_ident(dialect: Dialect, name: &str) -> String {
     match dialect {
         Dialect::Mssql => format!("[{name}]"),
-        Dialect::Postgres | Dialect::Sqlite => format!("\"{name}\""),
+        Dialect::Postgres | Dialect::Sqlite | Dialect::Db2 => format!("\"{name}\""),
         Dialect::MySql => format!("`{name}`"),
     }
 }
@@ -211,6 +230,10 @@ mod tests {
             "\"users\""
         );
         assert_eq!(quote_table(Dialect::MySql, "users").unwrap(), "`users`");
+        assert_eq!(
+            quote_table(Dialect::Db2, "DB2INST1.users").unwrap(),
+            "\"DB2INST1\".\"users\""
+        );
     }
 
     #[test]

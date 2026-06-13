@@ -10,6 +10,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { LogService } from "../../services/log.service";
 import {
   ConnectionConfig,
+  Db2DriverStatus,
   DbKind,
   TauriService,
   errorMessage,
@@ -30,6 +31,8 @@ export class ConnectionsPage implements OnInit {
   readonly result = signal<{ ok: boolean; message: string } | null>(null);
   /** 編輯中的既有連線 id（null = 新增） */
   readonly editingId = signal<string | null>(null);
+  /** DB2 驅動就緒狀態（選 DB2 時偵測；null = 尚未檢查或非 DB2） */
+  readonly db2Driver = signal<Db2DriverStatus | null>(null);
 
   readonly encodings = [
     { value: "", label: "自動偵測" },
@@ -69,8 +72,30 @@ export class ConnectionsPage implements OnInit {
     return this.kind === "sqlserver";
   }
 
+  get isDb2(): boolean {
+    return this.kind === "db2";
+  }
+
   get isFile(): boolean {
     return this.kind === "file";
+  }
+
+  /** 類型切換：選擇 DB2 時偵測 IBM 驅動是否就緒，否則清除提示。 */
+  async onKindChange(): Promise<void> {
+    if (this.kind === "db2") {
+      await this.refreshDb2Driver();
+    } else {
+      this.db2Driver.set(null);
+    }
+  }
+
+  private async refreshDb2Driver(): Promise<void> {
+    try {
+      this.db2Driver.set(await this.tauri.checkDb2Driver());
+    } catch (e) {
+      this.db2Driver.set(null);
+      this.log.error("連線", `DB2 驅動偵測失敗：${errorMessage(e)}`);
+    }
   }
 
   get isDbWithAuth(): boolean {
@@ -103,6 +128,10 @@ export class ConnectionsPage implements OnInit {
   edit(conn: ConnectionConfig): void {
     this.editingId.set(conn.id);
     this.result.set(null);
+    this.db2Driver.set(null);
+    if (conn.kind === "db2") {
+      void this.refreshDb2Driver();
+    }
     this.form.patchValue({
       name: conn.name,
       kind: conn.kind,
@@ -121,6 +150,7 @@ export class ConnectionsPage implements OnInit {
   newConnection(): void {
     this.editingId.set(null);
     this.result.set(null);
+    this.db2Driver.set(null);
     this.form.reset({ kind: "postgres", host: "localhost", hasHeader: true });
   }
 
@@ -218,6 +248,7 @@ export class ConnectionsPage implements OnInit {
       postgres: "PostgreSQL",
       mysql: "MySQL",
       sqlite: "SQLite",
+      db2: "IBM DB2",
       file: "檔案",
     }[kind];
   }

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// 連線種類：四種資料庫 + 檔案來源（Excel / CSV）。
+/// 連線種類：五種資料庫 + 檔案來源（Excel / CSV）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DbKind {
@@ -9,6 +9,9 @@ pub enum DbKind {
     Postgres,
     MySql,
     Sqlite,
+    /// IBM DB2（LUW）。非純 Rust 驅動：透過 `ibm_db`（IBM CLI / ODBC 驅動）連線，
+    /// 僅在以 `db2` feature 編譯且系統備有 IBM Data Server Driver 時可用。
+    Db2,
     /// 檔案來源連線：`database` 為檔案路徑，搭配 `sheet` / `encoding` /
     /// `has_header`；僅可作為 ETL 來源，不可作為目標
     File,
@@ -53,6 +56,7 @@ impl ConnectionConfig {
             DbKind::SqlServer => 1433,
             DbKind::Postgres => 5432,
             DbKind::MySql => 3306,
+            DbKind::Db2 => 50000,
             DbKind::Sqlite | DbKind::File => 0,
         }
     }

@@ -2,8 +2,8 @@
 //! 關鍵字不分大小寫；`--` 為單行註解；識別字可用 `[名稱]` 或裸字。
 
 use crate::etl::script::ast::{
-    Assignment, ColRef, Condition, Expr, FileSource, Script, ScriptHeader, ScriptIssue, SourceDecl,
-    Statement,
+    Assignment, ColRef, Condition, ConnectionSource, Expr, FileSource, GenKind, Script,
+    ScriptHeader, ScriptIssue, SourceDecl, Statement,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -17,11 +17,13 @@ enum Tok {
     RBrace,
     LParen,
     RParen,
+    Plus,
     Assign,
     EqEq,
     KwIf,
     KwAdd,
     KwGo,
+    KwWork,
     KwNull,
     KwTrue,
     KwFalse,
@@ -161,6 +163,13 @@ fn lex(input: &str) -> Result<Vec<Token>, ScriptIssue> {
                 });
                 i += 1;
             }
+            '+' => {
+                tokens.push(Token {
+                    tok: Tok::Plus,
+                    line,
+                });
+                i += 1;
+            }
             c if c.is_ascii_digit()
                 || (c == '-' && chars.get(i + 1).is_some_and(|n| n.is_ascii_digit())) =>
             {
@@ -185,6 +194,7 @@ fn lex(input: &str) -> Result<Vec<Token>, ScriptIssue> {
                     "IF" => Tok::KwIf,
                     "ADD" => Tok::KwAdd,
                     "GO" => Tok::KwGo,
+                    "WORK" => Tok::KwWork,
                     "NULL" => Tok::KwNull,
                     "TRUE" => Tok::KwTrue,
                     "FALSE" => Tok::KwFalse,
@@ -275,7 +285,21 @@ impl Parser {
         })
     }
 
+    /// 運算式：單一項，或以 `+` 串接的合成欄位（轉文字後串接）。
     fn parse_expr(&mut self) -> Result<Expr, ScriptIssue> {
+        let first = self.parse_term()?;
+        if self.peek() != Some(&Tok::Plus) {
+            return Ok(first);
+        }
+        let mut parts = vec![first];
+        while self.peek() == Some(&Tok::Plus) {
+            self.next();
+            parts.push(self.parse_term()?);
+        }
+        Ok(Expr::Concat(parts))
+    }
+
+    fn parse_term(&mut self) -> Result<Expr, ScriptIssue> {
         let line = self.line();
         match self.peek() {
             Some(Tok::Str(_)) => {
@@ -317,9 +341,46 @@ impl Parser {
                 self.next();
                 Ok(Expr::Bool(false))
             }
-            Some(Tok::Ident(_)) => Ok(Expr::Col(self.parse_colref()?)),
+            Some(Tok::Ident(_)) => {
+                let r = self.parse_colref()?;
+                if r.prefix.len() == 1 && r.prefix[0].eq_ignore_ascii_case("gen") {
+                    return self.parse_gen(r);
+                }
+                Ok(Expr::Col(r))
+            }
             _ => Err(err(line, "預期欄位參照或字面值（'文字'、數字、NULL）")),
         }
+    }
+
+    /// `Gen.XXX` / `Gen.XXX(Text)` 產生器（Gen 為保留前綴）。
+    fn parse_gen(&mut self, r: ColRef) -> Result<Expr, ScriptIssue> {
+        let mut text_variant = false;
+        if self.peek() == Some(&Tok::LParen) {
+            self.next();
+            match self.next() {
+                Some(Token {
+                    tok: Tok::Ident(s), ..
+                }) if s.eq_ignore_ascii_case("text") => {}
+                _ => return Err(err(r.line, "產生器參數僅支援 (Text)")),
+            }
+            if self.next().map(|t| t.tok) != Some(Tok::RParen) {
+                return Err(err(r.line, "產生器缺少 `)`"));
+            }
+            text_variant = true;
+        }
+        GenKind::parse(&r.column, text_variant)
+            .map(Expr::Gen)
+            .ok_or_else(|| {
+                err(
+                    r.line,
+                    format!(
+                        "未知的產生器 Gen.{}{}（支援：{}）",
+                        r.column,
+                        if text_variant { "(Text)" } else { "" },
+                        GenKind::ALL_LABELS
+                    ),
+                )
+            })
     }
 
     fn expect_str(&mut self, line: usize, what: &str) -> Result<String, ScriptIssue> {
@@ -369,12 +430,53 @@ impl Parser {
         let (func, _) = self.expect_ident("FILE(...) 或 CONNECTION('名稱')")?;
         match func.to_uppercase().as_str() {
             "FILE" => Ok(SourceDecl::File(self.parse_file_args(line)?)),
-            "CONNECTION" => Ok(SourceDecl::Connection(self.parse_connection_args(line)?)),
+            "CONNECTION" => Ok(SourceDecl::Connection(
+                self.parse_source_connection_args(line)?,
+            )),
             other => Err(err(
                 line,
                 format!("未知的來源型式 {other}（支援 FILE / CONNECTION）"),
             )),
         }
+    }
+
+    /// SOURCE 的 CONNECTION 參數：`('名稱' [, TABLE='…' | QUERY='…'])`。
+    /// 檔案連線只用名稱；資料庫連線以 TABLE / QUERY 指明讀取內容（擇一）。
+    fn parse_source_connection_args(
+        &mut self,
+        line: usize,
+    ) -> Result<ConnectionSource, ScriptIssue> {
+        if self.next().map(|t| t.tok) != Some(Tok::LParen) {
+            return Err(err(line, "CONNECTION 之後預期 `(`"));
+        }
+        let name = self.expect_str(line, "CONNECTION 參數需為字串（'連線名稱'）")?;
+        let mut src = ConnectionSource {
+            name,
+            ..Default::default()
+        };
+        while self.peek() == Some(&Tok::Comma) {
+            self.next();
+            let (key, kline) = self.expect_ident("TABLE 或 QUERY")?;
+            if self.next().map(|t| t.tok) != Some(Tok::Assign) {
+                return Err(err(kline, format!("{key} 之後預期 `=`")));
+            }
+            match key.to_uppercase().as_str() {
+                "TABLE" => {
+                    src.table = Some(self.expect_str(kline, "TABLE 需為字串（'schema.table'）")?)
+                }
+                "QUERY" => {
+                    src.query = Some(self.expect_str(kline, "QUERY 需為字串（'SELECT ...'）")?)
+                }
+                other => return Err(err(kline, format!("未知的 CONNECTION 參數 {other}"))),
+            }
+        }
+        if self.next().map(|t| t.tok) != Some(Tok::RParen) {
+            return Err(err(line, "CONNECTION(...) 缺少 `)`"));
+        }
+        if src.table.is_some() && src.query.is_some() {
+            return Err(err(line, "TABLE 與 QUERY 只能擇一"));
+        }
+        Ok(src)
     }
 
     fn parse_connection_ref(&mut self, line: usize) -> Result<String, ScriptIssue> {
@@ -515,15 +617,34 @@ impl Parser {
         }
 
         Ok(Statement {
+            name: None,
             condition,
             target_table,
             assignments,
             line: stmt_line,
         })
     }
+
+    /// `WORK '名稱' { <陳述式> }` 工作項目區塊。
+    fn parse_work(&mut self) -> Result<Statement, ScriptIssue> {
+        let line = self.line();
+        self.next(); // WORK
+        let name = self.expect_str(line, "WORK 之後預期 '作業名稱'（字串）")?;
+        if self.next().map(|t| t.tok) != Some(Tok::LBrace) {
+            return Err(err(line, "WORK '名稱' 之後預期 `{`"));
+        }
+        let mut stmt = self.parse_statement()?;
+        stmt.name = Some(name);
+        if self.next().map(|t| t.tok) != Some(Tok::RBrace) {
+            return Err(err(self.line(), "WORK 區塊缺少結尾 `}`"));
+        }
+        Ok(stmt)
+    }
 }
 
-/// 解析整份腳本（選擇性 SOURCE/TARGET 標頭 + 以 GO 分隔的陳述式）。
+/// 解析整份腳本：選擇性 SOURCE/TARGET 標頭 + 工作項目。
+/// 工作項目為 `WORK '名稱' { … }` 區塊（之間不需 GO），
+/// 或舊式以 GO 分隔的裸陳述式；GO 在任何項目邊界皆可出現（忽略）。
 pub fn parse(input: &str) -> Result<Script, ScriptIssue> {
     let tokens = lex(input)?;
     let mut parser = Parser { tokens, pos: 0 };
@@ -537,11 +658,15 @@ pub fn parse(input: &str) -> Result<Script, ScriptIssue> {
         if parser.peek().is_none() {
             break;
         }
-        statements.push(parser.parse_statement()?);
+        if parser.peek() == Some(&Tok::KwWork) {
+            statements.push(parser.parse_work()?);
+        } else {
+            statements.push(parser.parse_statement()?);
+        }
         match parser.peek() {
-            None | Some(Tok::KwGo) => {}
+            None | Some(Tok::KwGo) | Some(Tok::KwWork) => {}
             _ => {
-                return Err(err(parser.line(), "陳述式結束後預期 GO 或檔案結尾"));
+                return Err(err(parser.line(), "工作項目結束後預期 WORK、GO 或檔案結尾"));
             }
         }
     }
@@ -612,6 +737,132 @@ GO
     fn multiple_statements_with_go() {
         let script = parse("[a] ADD { x = 1 }\nGO\n[b] ADD { y = 2 }\nGO").unwrap();
         assert_eq!(script.statements.len(), 2);
+        assert_eq!(script.statements[0].name, None);
+    }
+
+    #[test]
+    fn parses_work_blocks() {
+        // 使用者範例格式：WORK 區塊之間不需 GO，結尾 GO 可有可無；名稱可重複
+        let script = parse(
+            r#"
+SOURCE = FILE(TYPE=CSV, PATH='C:\data\users.csv', ENCODING='Big5', HEADER=TRUE)
+TARGET = CONNECTION('正式環境 ERP')
+WORK 'EluCloudAccount綁定EnterId' {
+If [SOURCE].email == [dbo].[Account].email
+[dbo].[ExternalIdentityMappings] ADD
+{
+ AccountId = [dbo].[Account].Id
+,ExternalId = [SOURCE].Id
+,ExternalSystemType = N'MICROSOFT_ENTRA_ID'
+}
+}
+WORK 'EluCloudAccount綁定EnterId' {
+If [SOURCE].email == [dbo].[Account].email
+[dbo].[ExternalIdentityMappings] ADD
+{
+ AccountId = [dbo].[Account].Id
+,ExternalId = [SOURCE].Id
+,ExternalSystemType = N'MICROSOFT_ENTRA_ID'
+}
+}
+
+GO
+"#,
+        )
+        .unwrap();
+        assert_eq!(script.statements.len(), 2);
+        assert_eq!(
+            script.statements[0].name.as_deref(),
+            Some("EluCloudAccount綁定EnterId")
+        );
+        assert_eq!(
+            script.statements[1].name.as_deref(),
+            Some("EluCloudAccount綁定EnterId")
+        );
+        let s = &script.statements[0];
+        assert!(s.condition.is_some());
+        assert_eq!(s.target_table, vec!["dbo", "ExternalIdentityMappings"]);
+        assert_eq!(s.assignments.len(), 3);
+    }
+
+    #[test]
+    fn work_block_mixed_with_legacy_statement() {
+        let script = parse("WORK 'A' { [t] ADD { x = 1 } }\nGO\n[u] ADD { y = 2 }\nGO").unwrap();
+        assert_eq!(script.statements.len(), 2);
+        assert_eq!(script.statements[0].name.as_deref(), Some("A"));
+        assert_eq!(script.statements[1].name, None);
+    }
+
+    #[test]
+    fn parses_generators() {
+        let script = parse(
+            "[t] ADD { id = Gen.ULID, g = Gen.GUID(Text), d = gen.DateTime, h = Gen.SHA256 }",
+        )
+        .unwrap();
+        let a = &script.statements[0].assignments;
+        assert_eq!(a[0].value, Expr::Gen(GenKind::Ulid));
+        assert_eq!(a[1].value, Expr::Gen(GenKind::GuidText));
+        assert_eq!(a[2].value, Expr::Gen(GenKind::DateTime));
+        assert_eq!(a[3].value, Expr::Gen(GenKind::Sha256));
+
+        // 未知產生器 / 不支援的 (Text) 變體
+        let e = parse("[t] ADD { x = Gen.Foo }").unwrap_err();
+        assert!(e.message.contains("未知的產生器"));
+        let e = parse("[t] ADD { x = Gen.ULID(Text) }").unwrap_err();
+        assert!(e.message.contains("未知的產生器"));
+    }
+
+    #[test]
+    fn parses_concat_expressions() {
+        // 使用者範例：常值 + 比對表欄位、來源欄位 + 常值
+        let script = parse(
+            "[t] ADD {
+               a = N'MICROSOFT_ENTRA_ID:' + [dbo].[DirectoryAccounts].[DisplayName],
+               b = SOURCE.displayName + N'MICROSOFT_ENTRA_ID',
+               c = N'x' + Gen.GUID + 1
+             }",
+        )
+        .unwrap();
+        let a = &script.statements[0].assignments;
+
+        let Expr::Concat(parts) = &a[0].value else {
+            panic!("預期合成欄位");
+        };
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(&parts[0], Expr::Text(t) if t == "MICROSOFT_ENTRA_ID:"));
+        assert!(matches!(&parts[1], Expr::Col(r) if r.column == "DisplayName"));
+        assert_eq!(
+            a[0].value.to_dsl(),
+            "N'MICROSOFT_ENTRA_ID:' + [dbo].[DirectoryAccounts].[DisplayName]"
+        );
+
+        let Expr::Concat(parts) = &a[1].value else {
+            panic!("預期合成欄位");
+        };
+        assert!(matches!(&parts[0], Expr::Col(r) if r.prefix == vec!["SOURCE"]));
+
+        let Expr::Concat(parts) = &a[2].value else {
+            panic!("預期合成欄位");
+        };
+        assert_eq!(parts.len(), 3);
+        assert!(matches!(parts[1], Expr::Gen(GenKind::Guid)));
+        assert!(matches!(parts[2], Expr::Int(1)));
+
+        // 尾隨 + 缺項 → 錯誤
+        assert!(parse("[t] ADD { x = N'a' + }").is_err());
+    }
+
+    #[test]
+    fn work_block_errors() {
+        // 名稱必須是字串
+        let e = parse("WORK abc { [t] ADD { x = 1 } }").unwrap_err();
+        assert!(e.message.contains("作業名稱"));
+        // 缺少結尾 }
+        let e = parse("WORK 'A' { [t] ADD { x = 1 }").unwrap_err();
+        assert!(e.message.contains("結尾"));
+        // 缺少 {
+        let e = parse("WORK 'A' [t] ADD { x = 1 } }").unwrap_err();
+        assert!(e.message.contains("`{`"));
     }
 
     #[test]
@@ -653,13 +904,49 @@ GO
         let script = parse("SOURCE = CONNECTION('月結檔')\n[t] ADD { x = 1 }").unwrap();
         assert_eq!(
             script.header.source,
-            Some(SourceDecl::Connection("月結檔".into()))
+            Some(SourceDecl::Connection(ConnectionSource {
+                name: "月結檔".into(),
+                table: None,
+                query: None,
+            }))
         );
         assert!(script.header.target_connection.is_none());
 
         // 無標頭照常解析
         let script = parse("[t] ADD { x = 1 }").unwrap();
         assert!(script.header.source.is_none());
+    }
+
+    #[test]
+    fn parses_db_source_connection_with_table_or_query() {
+        let script =
+            parse("SOURCE = CONNECTION('來源DB', TABLE='dbo.users')\n[t] ADD { x = 1 }").unwrap();
+        assert_eq!(
+            script.header.source,
+            Some(SourceDecl::Connection(ConnectionSource {
+                name: "來源DB".into(),
+                table: Some("dbo.users".into()),
+                query: None,
+            }))
+        );
+
+        let script = parse(
+            "SOURCE = CONNECTION('來源DB', QUERY='SELECT id, email FROM users WHERE active = 1')\n[t] ADD { x = 1 }",
+        )
+        .unwrap();
+        assert_eq!(
+            script.header.source,
+            Some(SourceDecl::Connection(ConnectionSource {
+                name: "來源DB".into(),
+                table: None,
+                query: Some("SELECT id, email FROM users WHERE active = 1".into()),
+            }))
+        );
+
+        // TABLE 與 QUERY 不可同時指定
+        let e =
+            parse("SOURCE = CONNECTION('x', TABLE='a', QUERY='b')\n[t] ADD { x = 1 }").unwrap_err();
+        assert!(e.message.contains("擇一"));
     }
 
     #[test]

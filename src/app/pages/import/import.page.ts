@@ -7,6 +7,7 @@ import { EtlStateService } from "../../services/etl-state.service";
 import { LogService } from "../../services/log.service";
 import {
   ConnectionConfig,
+  TableInfo,
   TauriService,
   errorMessage,
 } from "../../services/tauri.service";
@@ -29,16 +30,24 @@ export class ImportPage {
 
   readonly loading = signal(false);
   readonly error = signal<string | null>(null);
+  /** 資料庫來源：可選資料表清單 */
+  readonly tables = signal<TableInfo[]>([]);
+  /** 資料庫來源：自訂 SQL 模式 */
+  readonly useCustomSql = signal(false);
   private lastLoadedConnId: string | null = null;
 
   constructor() {
-    // 頂部工具列選擇「來源」檔案連線時自動載入
+    // 頂部工具列選擇「來源」連線時自動載入（檔案連線載入預覽；資料庫連線列資料表）
     effect(() => {
       const conn = this.ws.sourceConnection();
       untracked(() => {
         if (conn && conn.id !== this.lastLoadedConnId) {
           this.lastLoadedConnId = conn.id;
-          void this.loadFromConnection(conn);
+          if (conn.kind === "file") {
+            void this.loadFromConnection(conn);
+          } else {
+            void this.loadFromDbConnection(conn);
+          }
         }
       });
     });
@@ -46,6 +55,8 @@ export class ImportPage {
 
   private async loadFromConnection(conn: ConnectionConfig): Promise<void> {
     this.state.resetSource();
+    this.tables.set([]);
+    this.useCustomSql.set(false);
     this.state.sourcePath.set(conn.database);
     this.state.encoding.set(conn.encoding ?? null);
     this.state.hasHeader.set(conn.hasHeader ?? true);
@@ -59,6 +70,92 @@ export class ImportPage {
       this.log.info("匯入", `已載入來源連線「${conn.name}」`);
     } catch (e) {
       this.error.set(errorMessage(e));
+      this.log.error("匯入", errorMessage(e));
+    } finally {
+      this.loading.set(false);
+    }
+  }
+
+  private async loadFromDbConnection(conn: ConnectionConfig): Promise<void> {
+    this.state.resetSource();
+    this.state.sourceKind.set("database");
+    this.state.dbConnId.set(conn.id);
+    this.tables.set([]);
+    this.useCustomSql.set(false);
+    this.error.set(null);
+    this.loading.set(true);
+    try {
+      this.tables.set(await this.tauri.getTables(conn.id));
+      this.log.info(
+        "匯入",
+        `已連線資料庫來源「${conn.name}」，請選擇資料表或改用自訂 SQL`,
+      );
+    } catch (e) {
+      this.error.set(errorMessage(e));
+      this.log.error("匯入", errorMessage(e));
+    } finally {
+      this.loading.set(false);
+    }
+  }
+
+  get isDbSource(): boolean {
+    return this.state.sourceKind() === "database";
+  }
+
+  tableKey(t: TableInfo): string {
+    return t.schema ? `${t.schema}.${t.name}` : t.name;
+  }
+
+  async onDbTableChange(table: string): Promise<void> {
+    this.state.dbTable.set(table);
+    if (!table) {
+      this.state.preview.set(null);
+      this.state.dbQuery.set("");
+      return;
+    }
+    await this.loadDbPreview(table, null);
+  }
+
+  onCustomSqlToggle(on: boolean): void {
+    this.useCustomSql.set(on);
+    if (on) {
+      this.state.dbTable.set("");
+      this.state.preview.set(null);
+      this.state.dbQuery.set("");
+    }
+  }
+
+  async runCustomSql(): Promise<void> {
+    const sql = this.state.dbCustomSql().trim();
+    if (!sql) {
+      return;
+    }
+    await this.loadDbPreview(null, sql);
+  }
+
+  private async loadDbPreview(table: string | null, query: string | null): Promise<void> {
+    const connId = this.state.dbConnId();
+    if (!connId) {
+      return;
+    }
+    this.loading.set(true);
+    this.error.set(null);
+    try {
+      const p = await this.tauri.readDbSourcePreview(connId, table, query);
+      this.state.dbQuery.set(p.query);
+      this.state.preview.set({
+        columns: p.columns,
+        rows: p.rows,
+        totalRows: p.rows.length,
+        encoding: null,
+      });
+      this.log.info(
+        "匯入",
+        `查詢預覽 ${p.rows.length} 行（${p.columns.length} 欄）`,
+      );
+    } catch (e) {
+      this.error.set(errorMessage(e));
+      this.state.preview.set(null);
       this.log.error("匯入", errorMessage(e));
     } finally {
       this.loading.set(false);
@@ -95,6 +192,8 @@ export class ImportPage {
       return;
     }
     this.state.resetSource();
+    this.tables.set([]);
+    this.useCustomSql.set(false);
     this.state.sourcePath.set(path);
     this.error.set(null);
     this.loading.set(true);
@@ -173,6 +272,6 @@ export class ImportPage {
   }
 
   next(): void {
-    this.router.navigate(["/mapping"]);
+    this.router.navigate(["/works"]);
   }
 }

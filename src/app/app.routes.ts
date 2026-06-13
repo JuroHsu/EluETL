@@ -13,18 +13,12 @@ export const routes: Routes = [
       import("./pages/import/import.page").then((m) => m.ImportPage),
   },
   {
-    path: "mapping",
+    path: "works",
     loadComponent: () =>
-      import("./pages/mapping/mapping.page").then((m) => m.MappingPage),
+      import("./pages/works/works.page").then((m) => m.WorksPage),
   },
-  {
-    path: "execute",
-    loadComponent: () =>
-      import("./pages/execute/execute.page").then((m) => m.ExecutePage),
-  },
-  {
-    path: "script",
-    loadComponent: () =>
-      import("./pages/script/script.page").then((m) => m.ScriptPage),
-  },
+  // 舊路由：欄位對應與 ETL 腳本已整合為「遷移作業」
+  { path: "mapping", redirectTo: "works" },
+  { path: "script", redirectTo: "works" },
+  { path: "execute", redirectTo: "works" },
 ];

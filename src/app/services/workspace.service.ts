@@ -15,7 +15,7 @@ export class WorkspaceService {
   private readonly tauri = inject(TauriService);
 
   readonly connections = signal<ConnectionConfig[]>([]);
-  /** 來源連線（檔案類型；null = 由「匯入資料」頁手動載入） */
+  /** 來源連線（檔案或資料庫；null = 由「匯入資料」頁手動載入） */
   readonly sourceConnId = signal<string | null>(null);
   /** 目標連線（資料庫類型） */
   readonly targetConnId = signal<string | null>(null);
@@ -48,7 +48,7 @@ export class WorkspaceService {
     if (this.targetConnId() && !this.dbConnections().some((c) => c.id === this.targetConnId())) {
       this.targetConnId.set(null);
     }
-    if (this.sourceConnId() && !this.fileConnections().some((c) => c.id === this.sourceConnId())) {
+    if (this.sourceConnId() && !list.some((c) => c.id === this.sourceConnId())) {
       this.sourceConnId.set(null);
     }
     const dbs = this.dbConnections();

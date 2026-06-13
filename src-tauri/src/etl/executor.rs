@@ -1,14 +1,13 @@
 use std::time::Instant;
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::db::pool::AppState;
-use crate::etl::mapping::{ErrorPolicy, EtlJobConfig, WriteMode};
+use crate::etl::mapping::{ErrorPolicy, EtlJobConfig, SourceSpec, WriteMode};
+use crate::etl::source_input;
 use crate::etl::transform::{transform_rows, RowError};
-use crate::excel::source;
 use crate::models::errors::EluEtlError;
 use crate::models::value::{CellValue, DataType};
 
@@ -41,17 +40,6 @@ pub struct EtlSummary {
     pub failure: Option<String>,
     /// 錯誤明細（最多 1000 筆）
     pub errors: Vec<RowError>,
-}
-
-pub fn file_sha256(path: &str) -> Result<String, EluEtlError> {
-    let bytes = std::fs::read(path)?;
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
 }
 
 /// 執行期可變狀態（集中管理，避免散落的計數器）。
@@ -121,28 +109,28 @@ where
         errors: Vec::new(),
     };
 
-    // 讀取來源（同步 IO + 解析 → spawn_blocking）
+    // 讀取來源（檔案經 spawn_blocking；資料庫經來源連線的驅動）
     emit(rs.progress("read", 0, 0));
-    let (mut rows, sha) = {
-        let (path, sheet, encoding) = (
-            job.source_path.clone(),
-            job.sheet.clone(),
-            job.encoding.clone(),
-        );
-        tokio::task::spawn_blocking(move || {
-            let rows = source::read_rows(&path, &sheet, encoding.as_deref())?;
-            let sha = file_sha256(&path)?;
-            Ok::<_, EluEtlError>((rows, sha))
-        })
-        .await??
+    let data = match &job.source {
+        SourceSpec::File {
+            path,
+            sheet,
+            encoding,
+            has_header,
+        } => source_input::read_file(path, sheet, encoding.as_deref(), *has_header).await?,
+        SourceSpec::Database { conn_id, query } => {
+            let src_driver = state.get_or_create_driver(*conn_id).await?;
+            source_input::read_database(src_driver, query).await?
+        }
     };
-
-    if job.has_header && !rows.is_empty() {
-        rows.remove(0);
-    }
+    let sha = {
+        let spec = job.source.clone();
+        tokio::task::spawn_blocking(move || source_input::fingerprint(&spec)).await??
+    };
+    let mut rows = data.rows;
     rs.total_rows = rows.len() as u64;
-    // 來源檔行號：1-based，表頭佔第 1 行
-    let first_data_row = if job.has_header { 2 } else { 1 };
+    // 來源行號：1-based；檔案表頭佔第 1 行，資料庫自結果集第 1 行起
+    let first_data_row = data.first_data_row;
 
     store.upsert_job(&job, &sha, "running").await?;
     tracing::info!(

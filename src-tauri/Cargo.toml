@@ -2,7 +2,8 @@
 name = "elu-etl"
 version = "0.1.0"
 description = "Excel ↔ Database 高效能跨平台 ETL 桌面工具"
-authors = ["Elu Technology Co., Ltd."]
+authors = ["Elu Technology Ltd."]
+license = "MIT"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -13,6 +14,13 @@ edition = "2021"
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "elu_etl_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = []
+# IBM DB2 支援。非純 Rust：依賴 ibm_db（IBM CLI / ODBC 驅動）。
+# 預設關閉，使核心建置與 CI 維持純 Rust、無外部驅動需求；
+# 需連 DB2 時以 `cargo build --features db2` 編譯（須先安裝 IBM Data Server Driver）。
+db2 = ["dep:ibm_db"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -48,6 +56,10 @@ tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 keyring = "4.0.1"
 keyring-core = "1.0.0"
+md-5 = "0.11"
+# DB2 連線（選用，由 `db2` feature 開啟）。底層為 IBM CLI / ODBC 驅動，
+# 編譯時需系統備有 IBM Data Server Driver（clidriver）。
+ibm_db = { version = "1.0.8", optional = true }
 
 [dev-dependencies]
 tempfile = "3.27.0"

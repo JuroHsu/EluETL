@@ -27,6 +27,10 @@ impl DataType {
             .any(|k| t.contains(k))
         {
             DataType::Float
+        } else if t.contains("datetimeoffset") {
+            // 含時區位移：以 ISO 8601 文字繫結，由 DB 端隱含轉換
+            // （中介型別無時區概念，轉成 DateTime 會遺失位移）
+            DataType::Text
         } else if t.contains("datetime") || t.contains("timestamp") {
             DataType::DateTime
         } else if t == "date" {
@@ -156,7 +160,8 @@ impl CellValue {
         }
     }
 
-    fn to_display_string(&self) -> String {
+    /// 文字表示（轉 Text 與合成欄位串接共用；NULL 為空字串）。
+    pub fn to_display_string(&self) -> String {
         match self {
             CellValue::Null => String::new(),
             CellValue::Int(v) => v.to_string(),
