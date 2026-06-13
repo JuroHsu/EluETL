@@ -1,5 +1,6 @@
 //! ETL 腳本 DSL 的手寫 lexer + recursive descent parser。
-//! 關鍵字不分大小寫；`--` 為單行註解；識別字可用 `[名稱]` 或裸字。
+//! 關鍵字不分大小寫；`--` 或 `//` 為單行註解，`///` ~ `///` 為多行註解；
+//! 識別字可用 `[名稱]` 或裸字。
 
 use crate::etl::script::ast::{
     Assignment, ColRef, Condition, ConnectionSource, Expr, FileSource, GenKind, Script,
@@ -59,6 +60,34 @@ fn lex(input: &str) -> Result<Vec<Token>, ScriptIssue> {
             }
             c if c.is_whitespace() => i += 1,
             '-' if chars.get(i + 1) == Some(&'-') => {
+                // 單行註解
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '/' if chars.get(i + 1) == Some(&'/') && chars.get(i + 2) == Some(&'/') => {
+                // 多行註解 /// … ///（起止皆為 ///，內部可跨行）
+                let start = line;
+                i += 3;
+                loop {
+                    match chars.get(i) {
+                        None => return Err(err(start, "未閉合的多行註解（缺少結尾 ///）")),
+                        Some('/')
+                            if chars.get(i + 1) == Some(&'/')
+                                && chars.get(i + 2) == Some(&'/') =>
+                        {
+                            i += 3;
+                            break;
+                        }
+                        Some('\n') => {
+                            line += 1;
+                            i += 1;
+                        }
+                        Some(_) => i += 1,
+                    }
+                }
+            }
+            '/' if chars.get(i + 1) == Some(&'/') => {
                 // 單行註解
                 while i < chars.len() && chars[i] != '\n' {
                     i += 1;
@@ -1096,5 +1125,45 @@ GO
             &script.statements[0].assignments[0].value,
             Expr::Text(t) if t == "it's"
         ));
+    }
+
+    #[test]
+    fn parses_slash_line_comments() {
+        // // 單行註解（與 -- 等效），可置於行首或陳述式之後
+        let script = parse(
+            "// 將資料寫入目標\n[t] ADD { x = 1 } // 行尾註解\nGO",
+        )
+        .unwrap();
+        assert_eq!(script.statements.len(), 1);
+        assert_eq!(script.statements[0].assignments.len(), 1);
+
+        // '//' 出現在字串字面值內不應被當作註解
+        let script = parse("[t] ADD { url = 'http://example.com' }").unwrap();
+        assert!(matches!(
+            &script.statements[0].assignments[0].value,
+            Expr::Text(t) if t == "http://example.com"
+        ));
+    }
+
+    #[test]
+    fn parses_slash_block_comments() {
+        // /// … /// 多行註解，可跨行；行號於結尾後仍正確
+        let script = parse(
+            "/// 這是\n多行\n註解 ///\n[t] ADD { x = 1 }\n[bad] ADD { y = }",
+        )
+        .unwrap_err();
+        // 第 5 行才是真正的錯誤（前 3 行為註解）
+        assert_eq!(script.line, 5);
+
+        // 區塊註解可出現在行中間
+        let script = parse("[t] ADD { x = /// 註解 /// 1 }").unwrap();
+        assert!(matches!(
+            script.statements[0].assignments[0].value,
+            Expr::Int(1)
+        ));
+
+        // 未閉合的區塊註解 → 錯誤
+        let e = parse("/// 未閉合\n[t] ADD { x = 1 }").unwrap_err();
+        assert!(e.message.contains("未閉合的多行註解"));
     }
 }

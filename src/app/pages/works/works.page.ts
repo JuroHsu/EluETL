@@ -66,8 +66,22 @@ const GENERATORS: { value: string; label: string }[] = [
 
 /** ETL DSL 語法高亮（關鍵字 / [識別字] / 字串 / 數字 / 註解）。 */
 const etlLanguage = StreamLanguage.define({
-  token(stream) {
-    if (stream.match(/^--.*/)) return "comment";
+  startState: () => ({ inBlockComment: false }),
+  token(stream, state: { inBlockComment: boolean }) {
+    // /// … /// 多行註解（可跨行）
+    if (state.inBlockComment) {
+      if (stream.match(/^.*?\/\/\//)) state.inBlockComment = false;
+      else stream.skipToEnd();
+      return "comment";
+    }
+    if (stream.match(/^\/\/\//)) {
+      if (!stream.match(/^.*?\/\/\//)) {
+        stream.skipToEnd();
+        state.inBlockComment = true;
+      }
+      return "comment";
+    }
+    if (stream.match(/^(--|\/\/).*/)) return "comment";
     if (stream.match(/^N?'([^']|'')*'/i)) return "string";
     if (stream.match(/^\[[^\]\n]*\]/)) return "variableName";
     if (stream.match(/^Gen\.\w+(\(\s*Text\s*\))?/i)) return "keyword";
@@ -495,7 +509,7 @@ export class WorksPage implements AfterViewInit, OnDestroy {
         oldTgt = lines[rest];
         continue;
       }
-      if (t === "" || t.startsWith("--")) {
+      if (t === "" || t.startsWith("--") || t.startsWith("//")) {
         leading.push(lines[rest]);
         continue;
       }
