@@ -10,9 +10,11 @@ import {
   untracked,
   viewChild,
 } from "@angular/core";
+import { NgTemplateOutlet } from "@angular/common";
 import { FormsModule } from "@angular/forms";
 import { StreamLanguage } from "@codemirror/language";
 import { oneDark } from "@codemirror/theme-one-dark";
+import { tags as t } from "@lezer/highlight";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { EditorView, basicSetup } from "codemirror";
 
@@ -20,7 +22,12 @@ import { EtlStateService } from "../../services/etl-state.service";
 import { LogService } from "../../services/log.service";
 import { OutputService } from "../../services/output.service";
 import {
+  ActionModel,
   ColumnInfo,
+  CondRowModel,
+  ConditionModel,
+  ExprModel,
+  JoinModel,
   ScriptIssue,
   ScriptModel,
   ScriptWorkModel,
@@ -30,19 +37,20 @@ import {
 } from "../../services/tauri.service";
 import { WorkspaceService } from "../../services/workspace.service";
 
-const SAMPLE = `-- 遷移作業範例：以 email 比對既有帳號，將外部身分寫入對應表
--- SOURCE / TARGET 標頭由上方工具列的「來源 / 目標」自動帶入；
--- 也可手寫 SOURCE = FILE(...) / CONNECTION('名稱') 覆寫（密碼一律不入檔）
--- Gen.XXX 為產生器：GUID / ULID / Date / DateTime / SHA256（整列雜湊）等
+const SAMPLE = `-- 遷移作業範例（DSL v0.2）：CSV/Entra → EluCloud（查表 + 新增）
+-- SOURCE / TARGET 標頭由上方工具列自動帶入；也可手寫覆寫（密碼不入檔）
 WORK 'EluCloudAccount綁定EnterId' {
-  If [SOURCE].[userPrincipalName] == [dbo].[DirectoryAccounts].[Email]
-  [dbo].[ExternalIdentityMappings]
+  FROM entra   = SOURCE.[users]
+  JOIN account = TARGET.[dbo].[DirectoryAccounts]
+    ON (entra.[userPrincipalName] == account.[Email])
+
+  INTO TARGET.[dbo].[ExternalIdentityMappings]
   ADD {
-     [Id] = Gen.ULID
-    ,[AccountId] = [dbo].[DirectoryAccounts].[Id]
-    ,[ExternalId] = [SOURCE].[id]
+     [Id]                 = Gen.ULID
+    ,[AccountId]          = account.[Id]
+    ,[ExternalId]         = entra.[id]
     ,[ExternalSystemType] = N'MICROSOFT_ENTRA_ID'
-    ,[Label] = N'MICROSOFT_ENTRA_ID: {[dbo].[DirectoryAccounts].[DisplayName]}'
+    ,[Label]              = N'MICROSOFT_ENTRA_ID: {account.[DisplayName]}'
   }
 }
 GO
@@ -64,16 +72,85 @@ const GENERATORS: { value: string; label: string }[] = [
   { value: "MD5", label: "MD5（整列雜湊）" },
 ];
 
-/** ETL DSL 語法高亮（關鍵字 / [識別字] / 字串 / 數字 / 註解）。 */
-const etlLanguage = StreamLanguage.define({
-  startState: () => ({ inBlockComment: false }),
-  token(stream, state: { inBlockComment: boolean }) {
-    // /// … /// 多行註解（可跨行）
+/** 比較運算子 + 空值 / 集合 / 樣式 / 區間（條件 / 篩選下拉）。 */
+const COND_OPS = [
+  "==",
+  "!=",
+  ">",
+  "<",
+  ">=",
+  "<=",
+  "IS EMPTY",
+  "IS NOT EMPTY",
+  "IN",
+  "NOT IN",
+  "LIKE",
+  "NOT LIKE",
+  "BETWEEN",
+  "NOT BETWEEN",
+];
+
+/**
+ * ETL DSL v0.2 語法高亮（StreamLanguage，含字串插值）。
+ * 進入 N'…' 後遇 `{` 切到插值狀態，洞內欄位/產生器照常上色，`}` 切回；{{ }} 維持字面。
+ */
+type ETLState = { inBlockComment: boolean; inString: boolean; inInterp: boolean };
+
+const KEYWORDS_SINGLE =
+  /^(WORK|FROM|JOIN|WHERE|INTO|ON|MATCHED|MATCH|ADD|UPDATE|SKIP|DELETE|GO|SOURCE|TARGET|CONNECTION|FILE|TYPE|PATH|SHEET|ENCODING|HEADER|TABLE|QUERY|IS|EMPTY|NOT|IN|LIKE|BETWEEN|INNER|LEFT|JUDGE|EXECUTE|IF)\b/i;
+
+const etlLanguage = StreamLanguage.define<ETLState>({
+  startState: () => ({ inBlockComment: false, inString: false, inInterp: false }),
+
+  token(stream, state) {
+    // 0. 多行區塊註解 /// … ///（會跨行，必須最先處理）
     if (state.inBlockComment) {
       if (stream.match(/^.*?\/\/\//)) state.inBlockComment = false;
       else stream.skipToEnd();
       return "comment";
     }
+
+    // 字串以單行為界：跨行未閉合則於行首重置，避免污染後續行
+    if (stream.sol() && state.inString) {
+      state.inString = false;
+      state.inInterp = false;
+    }
+
+    // 1. 字串內部（含 {…} 插值）
+    if (state.inString) {
+      if (state.inInterp) {
+        if (stream.match(/^\}/)) {
+          state.inInterp = false;
+          return "punctuation";
+        }
+        if (stream.match(/^Gen\.\w+(\s*\(\s*Text\s*\))?/i)) return "keyword";
+        if (stream.match(/^\[[^\]\n]*\]/)) return "variableName";
+        if (stream.match(/^[A-Za-z_]\w*/)) return "propertyName";
+        if (stream.match(/^\d+(\.\d+)?/)) return "number";
+        if (stream.match(/^(==|!=|<=|>=|&&|\|\||[=!<>])/)) return "operator";
+        if (stream.match(/^[.,]/)) return "punctuation";
+        stream.next();
+        return null;
+      }
+      if (stream.match(/^''/)) return "string"; // '' 跳脫單引號（先於單一 ' 檢查）
+      if (stream.match(/^'/)) {
+        state.inString = false;
+        return "string";
+      }
+      if (stream.match(/^(\{\{|\}\})/)) return "string"; // {{ }} 字面大括號
+      if (stream.match(/^\{/)) {
+        state.inInterp = true;
+        return "punctuation";
+      }
+      if (stream.match(/^[^'{}]+/)) return "string";
+      stream.next();
+      return "string";
+    }
+
+    // 2. 單行註解
+    if (stream.match(/^(--|\/\/).*/)) return "comment";
+
+    // 3. 區塊註解起始
     if (stream.match(/^\/\/\//)) {
       if (!stream.match(/^.*?\/\/\//)) {
         stream.skipToEnd();
@@ -81,45 +158,138 @@ const etlLanguage = StreamLanguage.define({
       }
       return "comment";
     }
-    if (stream.match(/^(--|\/\/).*/)) return "comment";
-    if (stream.match(/^N?'([^']|'')*'/i)) return "string";
-    if (stream.match(/^\[[^\]\n]*\]/)) return "variableName";
-    if (stream.match(/^Gen\.\w+(\(\s*Text\s*\))?/i)) return "keyword";
-    if (stream.match(/^(IF|ADD|GO|WORK|NULL|TRUE|FALSE|SOURCE|TARGET|FILE|CONNECTION|TYPE|PATH|SHEET|ENCODING|HEADER|TABLE|QUERY)\b/i)) {
-      return "keyword";
+
+    // 4. 字串起始 N'…' / '…'
+    if (stream.match(/^N?'/i)) {
+      state.inString = true;
+      return "string";
     }
+
+    // 5. 字面值
+    if (stream.match(/^\b(TRUE|FALSE)\b/i)) return "bool";
+    if (stream.match(/^\bNULL\b/i)) return "null";
     if (stream.match(/^\d+(\.\d+)?/)) return "number";
-    if (stream.match(/^(==|=|\{|\}|\(|\)|,|\.)/)) return "operator";
+
+    // 6. 產生器 Gen.*
+    if (stream.match(/^Gen\.\w+(\s*\(\s*Text\s*\))?/i)) return "keyword";
+
+    // 7. 多字關鍵字（必須排在單字之前）
+    if (stream.match(/^IS\s+NOT\s+EMPTY\b/i)) return "keyword";
+    if (stream.match(/^IS\s+EMPTY\b/i)) return "keyword";
+    if (stream.match(/^NOT\s+MATCHED\b/i)) return "keyword";
+
+    // 8. 單字關鍵字
+    if (stream.match(KEYWORDS_SINGLE)) return "keyword";
+
+    // 9. 中括號識別字 [dbo].[Table]
+    if (stream.match(/^\[[^\]\n]*\]/)) return "variableName";
+
+    // 10. 一般識別字 / 別名 / 成員（account、mapping、entra…）
+    if (stream.match(/^[A-Za-z_]\w*/)) return "propertyName";
+
+    // 11. 運算子（多字元優先）
+    if (stream.match(/^(==|!=|<=|>=|&&|\|\||[=!<>])/)) return "operator";
+
+    // 12. 標點 / 結構
+    if (stream.match(/^[{}()\[\],.]/)) return "punctuation";
+
     stream.next();
     return null;
   },
+
+  tokenTable: {
+    bool: t.bool,
+    null: t.null,
+    punctuation: t.punctuation,
+  },
 });
+
+// ---- 視覺編輯模型 ----
+
+type ConnKind = "source" | "target";
 
 /** 執行作業的單一欄位指派列。 */
 interface AssignRow {
   targetColumn: string;
-  /** 值來源：來源欄位 / 比對表欄位 / 常值 / 生成 / 合成欄位 */
-  kind: "source" | "lookup" | "literal" | "gen" | "concat";
-  /** source/lookup = 欄位名稱；literal = 字面值原文；gen = 產生器名稱；
-   *  concat = 字串模板（如 N'前綴: {[SOURCE].[Name]}'，{…} 內為插值運算式） */
+  /** 值來源：欄位（別名.欄位）/ 常值 / 生成 / 合成欄位 */
+  kind: "field" | "literal" | "gen" | "concat";
+  /** field：別名 */
+  alias: string;
+  /** field：欄位名；gen/literal/concat 不用 */
+  column: string;
+  /** gen = 產生器名；literal = 字面值原文；concat = 字串模板 */
   value: string;
+}
+
+/** JOIN ON 的一條等式：來源側 == 查表側。 */
+interface JoinOnRow {
+  leftAlias: string;
+  leftColumn: string;
+  rightColumn: string;
+}
+
+/** 關聯表（查表 / lookup join）。 */
+interface JoinItem {
+  alias: string;
+  conn: ConnKind;
+  table: string;
+  on: JoinOnRow[];
+  policy: "inner" | "left";
+}
+
+/** 篩選（WHERE）的一條件。op 決定用到哪些值欄位。 */
+interface FilterRow {
+  alias: string;
+  column: string;
+  op: string; // COND_OPS
+  /** 比較值 / LIKE 樣式 */
+  value: string;
+  /** IN 清單（逗號分隔） */
+  values: string;
+  /** BETWEEN 下界 */
+  low: string;
+  /** BETWEEN 上界 */
+  high: string;
+}
+
+/** 合併鍵（merge ON）的一條件：目標欄位 op 來源值。 */
+interface MergeOnRow {
+  targetColumn: string;
+  op: string;
+  rhsKind: "field" | "literal";
+  rhsAlias: string;
+  rhsColumn: string;
+  rhsLiteral: string;
 }
 
 /** 視覺編輯的工作項目（對應一個 WORK 區塊）。 */
 interface WorkItem {
   name: string;
-  useCondition: boolean;
-  condSourceColumn: string;
-  /** 比對資料表（如 dbo.DirectoryAccounts） */
-  condTable: string;
-  condColumn: string;
-  targetTable: string;
+  fromAlias: string;
+  fromConn: ConnKind;
+  fromTable: string;
+  joins: JoinItem[];
+  /** WHERE：simple 時用 filters 編輯；否則（含 OR/NOT）用 whereRaw 唯讀 */
+  whereSimple: boolean;
+  filters: FilterRow[];
+  whereRaw: string;
+  intoAlias: string;
+  intoTable: string;
+  writeMode: "add" | "merge";
+  mergeOn: MergeOnRow[];
+  /** 寫入欄位（add 模式 = ADD；merge 模式 = NOT MATCHED → ADD） */
   assigns: AssignRow[];
+  /** merge 命中時動作 */
+  matchedAction: "skip" | "update" | "delete";
+  /** matchedAction=update 的 SET 欄位 */
+  matchedAssigns: AssignRow[];
+  /** merge 未命中時動作 */
+  notMatchedAction: "add" | "skip";
 }
 
 @Component({
   selector: "app-works",
-  imports: [FormsModule],
+  imports: [FormsModule, NgTemplateOutlet],
   templateUrl: "./works.page.html",
 })
 export class WorksPage implements AfterViewInit, OnDestroy {
@@ -127,36 +297,33 @@ export class WorksPage implements AfterViewInit, OnDestroy {
   private readonly log = inject(LogService);
   readonly ws = inject(WorkspaceService);
   readonly state = inject(EtlStateService);
-  /** 診斷 / 進度 / 結果統一寫入底部輸出面板（分頁呈現） */
   readonly output = inject(OutputService);
 
   private readonly editorHost = viewChild.required<ElementRef<HTMLElement>>("editorHost");
   private view: EditorView | null = null;
 
-  /** 文字編輯模式（false = 三欄視覺編輯） */
   readonly textMode = signal(false);
   readonly works = signal<WorkItem[]>([]);
   readonly selected = signal(-1);
 
   readonly tables = signal<TableInfo[]>([]);
   readonly targetColumns = signal<ColumnInfo[]>([]);
-  readonly lookupColumns = signal<ColumnInfo[]>([]);
+  /** 別名 → 該別名表的欄位名（值來源 / 條件欄位的建議） */
+  readonly aliasCols = signal<Record<string, string[]>>({});
   private readonly colCache = new Map<string, ColumnInfo[]>();
 
-  /** 目前開啟的 .etl 檔案路徑（null = 未命名） */
   readonly currentFile = signal<string | null>(null);
   private jobId: string | null = null;
 
   readonly canRun = computed(() => !this.output.running());
   readonly generators = GENERATORS;
+  readonly condOps = COND_OPS;
 
   constructor() {
-    // 頂部工具列切換目標連線時重載資料表清單
     effect(() => {
       const connId = this.ws.targetConnId();
       untracked(() => void this.loadTables(connId));
     });
-    // 來源 / 目標選擇或匯入狀態變更時，同步文字模式編輯器的 SOURCE / TARGET 標頭行
     effect(() => {
       this.textMode();
       this.ws.sourceConnId();
@@ -187,14 +354,12 @@ export class WorksPage implements AfterViewInit, OnDestroy {
         EditorView.theme({
           "&": { height: "100%", fontSize: "13px", backgroundColor: "#1e1e1e" },
           ".cm-gutters": { backgroundColor: "#1e1e1e" },
-          // body 全域 cursor: default 會被繼承，這裡顯式還原文字編輯游標（I-beam）
           ".cm-content": { cursor: "text" },
           ".cm-scroller": { cursor: "text" },
         }),
       ],
       parent: this.editorHost().nativeElement,
     });
-    // 初始進視覺模式；解析失敗則落回文字模式並顯示診斷
     void this.parseIntoModel(doc).then((ok) => this.textMode.set(!ok));
   }
 
@@ -216,7 +381,6 @@ export class WorksPage implements AfterViewInit, OnDestroy {
     });
   }
 
-  /** 目前腳本內容：文字模式取編輯器，視覺模式由模型產生。 */
   currentText(): string {
     return this.textMode() ? this.editorText() : this.generateScript();
   }
@@ -227,7 +391,6 @@ export class WorksPage implements AfterViewInit, OnDestroy {
       if (await this.parseIntoModel(this.editorText())) {
         this.textMode.set(false);
       } else {
-        // 解析失敗無法切到視覺模式：把錯誤帶到診斷分頁讓使用者看到原因
         this.output.show("diagnostics");
       }
     } else {
@@ -251,16 +414,11 @@ export class WorksPage implements AfterViewInit, OnDestroy {
     }
   }
 
-  /** 以名稱查找已儲存連線（與後端 get_connection_by_name 同樣不分大小寫、忽略前後空白）。 */
   private findConnByName(name: string) {
     const target = name.trim().toLowerCase();
     return this.ws.connections().find((c) => c.name.trim().toLowerCase() === target) ?? null;
   }
 
-  /**
-   * 腳本標頭 → 工具列：SOURCE / TARGET 的 CONNECTION 名稱回頭設定上方選擇器，
-   * inline FILE 來源寫入匯入狀態（來源選擇器 = 手動）。找不到的連線名稱以警告回報。
-   */
   private syncHeaderToWorkspace(m: ScriptModel): ScriptIssue[] {
     const warnings: ScriptIssue[] = [];
     if (m.targetConnection) {
@@ -300,7 +458,6 @@ export class WorksPage implements AfterViewInit, OnDestroy {
         }
       }
     } else {
-      // inline FILE：來源選擇器切回手動，檔案參數寫入匯入狀態
       this.ws.sourceConnId.set(null);
       this.state.sourceKind.set("file");
       this.state.sourcePath.set(src.path);
@@ -311,61 +468,173 @@ export class WorksPage implements AfterViewInit, OnDestroy {
     return warnings;
   }
 
+  // ---- 模型 → UI（解析方向） ----
+
   private modelToWorks(m: ScriptModel): WorkItem[] {
     return m.works.map((w, i) => this.workFromModel(w, i));
   }
 
+  private exprToText(e: ExprModel): string {
+    switch (e.kind) {
+      case "col":
+        return `${e.alias}.[${e.column}]`;
+      case "text":
+        return `N'${e.value.replace(/'/g, "''")}'`;
+      case "int":
+      case "float":
+        return String(e.value);
+      case "bool":
+        return e.value ? "TRUE" : "FALSE";
+      case "null":
+        return "NULL";
+      case "gen":
+        return `Gen.${e.name}`;
+      case "concat":
+        return e.expr;
+    }
+  }
+
+  private assignFromModel(a: { targetColumn: string; value: ExprModel }): AssignRow {
+    const v = a.value;
+    switch (v.kind) {
+      case "col":
+        return { targetColumn: a.targetColumn, kind: "field", alias: v.alias, column: v.column, value: "" };
+      case "gen":
+        return { targetColumn: a.targetColumn, kind: "gen", alias: "", column: "", value: v.name };
+      case "concat":
+        return { targetColumn: a.targetColumn, kind: "concat", alias: "", column: "", value: v.expr };
+      default:
+        return { targetColumn: a.targetColumn, kind: "literal", alias: "", column: "", value: this.exprToText(v) };
+    }
+  }
+
+  /** 取條件裡的等值比較列（JOIN ON / merge ON 一定是扁平 AND 的 ==）。 */
+  private cmpRows(cond: ConditionModel): { left: ExprModel; op: string; right: ExprModel }[] {
+    return cond.rows.filter((r): r is Extract<CondRowModel, { kind: "cmp" }> => r.kind === "cmp");
+  }
+
+  private joinOnFromModel(j: JoinModel): JoinOnRow[] {
+    const ja = j.binding.alias.toLowerCase();
+    return this.cmpRows(j.on).map((c): JoinOnRow => {
+      const leftSelf = c.left.kind === "col" && c.left.alias.toLowerCase() === ja;
+      const self = leftSelf ? c.left : c.right;
+      const other = leftSelf ? c.right : c.left;
+      return {
+        leftAlias: other.kind === "col" ? other.alias : "",
+        leftColumn: other.kind === "col" ? other.column : "",
+        rightColumn: self.kind === "col" ? self.column : "",
+      };
+    });
+  }
+
+  private blankFilter(): FilterRow {
+    return { alias: "", column: "", op: "==", value: "", values: "", low: "", high: "" };
+  }
+
+  private filterFromRow(r: CondRowModel): FilterRow {
+    const f = this.blankFilter();
+    const setField = (e: ExprModel) => {
+      if (e.kind === "col") {
+        f.alias = e.alias;
+        f.column = e.column;
+      }
+    };
+    switch (r.kind) {
+      case "cmp":
+        if (r.left.kind === "col") {
+          setField(r.left);
+          f.op = r.op;
+          f.value = this.exprToText(r.right);
+        } else {
+          setField(r.right);
+          f.op = r.op;
+          f.value = this.exprToText(r.left);
+        }
+        break;
+      case "empty":
+        setField(r.expr);
+        f.op = r.negated ? "IS NOT EMPTY" : "IS EMPTY";
+        break;
+      case "in":
+        setField(r.expr);
+        f.op = r.negated ? "NOT IN" : "IN";
+        f.values = r.list.map((e) => this.exprToText(e)).join(", ");
+        break;
+      case "like":
+        setField(r.expr);
+        f.op = r.negated ? "NOT LIKE" : "LIKE";
+        f.value = this.exprToText(r.pattern);
+        break;
+      case "between":
+        setField(r.expr);
+        f.op = r.negated ? "NOT BETWEEN" : "BETWEEN";
+        f.low = this.exprToText(r.low);
+        f.high = this.exprToText(r.high);
+        break;
+    }
+    return f;
+  }
+
+  private mergeOnFromModel(cond: ConditionModel, intoAlias: string): MergeOnRow[] {
+    const ia = intoAlias.toLowerCase();
+    return this.cmpRows(cond).map((c): MergeOnRow => {
+      const leftTarget = c.left.kind === "col" && c.left.alias.toLowerCase() === ia;
+      const targetCol = leftTarget
+        ? c.left.kind === "col"
+          ? c.left.column
+          : ""
+        : c.right.kind === "col"
+          ? c.right.column
+          : "";
+      const rhs = leftTarget ? c.right : c.left;
+      if (rhs.kind === "col") {
+        return { targetColumn: targetCol, op: c.op, rhsKind: "field", rhsAlias: rhs.alias, rhsColumn: rhs.column, rhsLiteral: "" };
+      }
+      return { targetColumn: targetCol, op: c.op, rhsKind: "literal", rhsAlias: "", rhsColumn: "", rhsLiteral: this.exprToText(rhs) };
+    });
+  }
+
   private workFromModel(w: ScriptWorkModel, index: number): WorkItem {
-    const lookupKey = w.condition
-      ? w.condition.right.prefix.map((p) => p.toLowerCase()).join(".")
-      : null;
+    const intoAlias = w.into.alias ?? "";
+    const matched: ActionModel | null = w.merge ? w.merge.matched : null;
+    const notMatched: ActionModel | null = w.merge ? w.merge.notMatched : null;
+    const addAction: ActionModel | null = w.merge ? notMatched : w.action;
+    const whereSimple = w.where ? w.where.simple : true;
     return {
       name: w.name ?? `作業 ${index + 1}`,
-      useCondition: !!w.condition,
-      condSourceColumn: w.condition?.left.column ?? "",
-      condTable: w.condition?.right.prefix.join(".") ?? "",
-      condColumn: w.condition?.right.column ?? "",
-      targetTable: w.targetTable.join("."),
-      assigns: w.assignments.map((a): AssignRow => {
-        const v = a.value;
-        switch (v.kind) {
-          case "col": {
-            const key = v.prefix.map((p) => p.toLowerCase()).join(".");
-            if (lookupKey !== null && key === lookupKey) {
-              return { targetColumn: a.targetColumn, kind: "lookup", value: v.column };
-            }
-            return { targetColumn: a.targetColumn, kind: "source", value: v.column };
-          }
-          case "text":
-            return {
-              targetColumn: a.targetColumn,
-              kind: "literal",
-              value: `N'${v.value.replace(/'/g, "''")}'`,
-            };
-          case "int":
-          case "float":
-            return { targetColumn: a.targetColumn, kind: "literal", value: String(v.value) };
-          case "bool":
-            return {
-              targetColumn: a.targetColumn,
-              kind: "literal",
-              value: v.value ? "TRUE" : "FALSE",
-            };
-          case "null":
-            return { targetColumn: a.targetColumn, kind: "literal", value: "NULL" };
-          case "gen":
-            return { targetColumn: a.targetColumn, kind: "gen", value: v.name };
-          case "concat":
-            return { targetColumn: a.targetColumn, kind: "concat", value: v.expr };
-        }
-      }),
+      fromAlias: w.from.alias,
+      fromConn: w.from.conn,
+      fromTable: w.from.table.join("."),
+      joins: w.joins.map((j) => ({
+        alias: j.binding.alias,
+        conn: j.binding.conn,
+        table: j.binding.table.join("."),
+        policy: j.policy,
+        on: this.joinOnFromModel(j),
+      })),
+      whereSimple,
+      filters: w.where && whereSimple ? w.where.rows.map((r) => this.filterFromRow(r)) : [],
+      whereRaw: w.where ? w.where.raw : "",
+      intoAlias,
+      intoTable: w.into.table.join("."),
+      writeMode: w.merge ? "merge" : "add",
+      mergeOn: w.merge ? this.mergeOnFromModel(w.merge.on, intoAlias) : [],
+      assigns: (addAction?.assignments ?? []).map((a) => this.assignFromModel(a)),
+      matchedAction: matched?.kind === "update" ? "update" : matched?.kind === "delete" ? "delete" : "skip",
+      matchedAssigns:
+        matched?.kind === "update" ? matched.assignments.map((a) => this.assignFromModel(a)) : [],
+      notMatchedAction: notMatched?.kind === "add" ? "add" : w.merge ? "skip" : "add",
     };
   }
 
-  // ---- 腳本產生（視覺模型 → DSL 文字） ----
+  // ---- UI → DSL（產生方向） ----
 
   private esc(s: string): string {
     return s.replace(/'/g, "''");
+  }
+
+  private connKw(conn: ConnKind): string {
+    return conn === "source" ? "SOURCE" : "TARGET";
   }
 
   private tableRef(table: string): string {
@@ -376,31 +645,93 @@ export class WorksPage implements AfterViewInit, OnDestroy {
       .join(".");
   }
 
-  /** 常值輸入正規化：數字 / TRUE / FALSE / NULL / 已加引號者原樣，其餘包成 N'…'。 */
-  private literalText(raw: string): string {
-    const t = raw.trim();
-    if (!t) {
-      return "NULL";
-    }
-    if (/^-?\d+(\.\d+)?$/.test(t) || /^(TRUE|FALSE|NULL)$/i.test(t) || /^N?'[\s\S]*'$/i.test(t)) {
-      return t;
-    }
-    return `N'${this.esc(t)}'`;
+  private bindingDsl(conn: ConnKind, table: string): string {
+    const ref = this.tableRef(table);
+    return ref ? `${this.connKw(conn)}.${ref}` : this.connKw(conn);
   }
 
-  private valueText(w: WorkItem, a: AssignRow): string {
+  /** 指派常值正規化：數字 / TRUE / FALSE / NULL / 已加引號者原樣，其餘包成 N'…'。 */
+  private literalText(raw: string): string {
+    const t2 = raw.trim();
+    if (!t2) {
+      return "NULL";
+    }
+    if (/^-?\d+(\.\d+)?$/.test(t2) || /^(TRUE|FALSE|NULL)$/i.test(t2) || /^N?'[\s\S]*'$/i.test(t2)) {
+      return t2;
+    }
+    return `N'${this.esc(t2)}'`;
+  }
+
+  /** 條件 RHS：除常值外，也讓欄位參照（含 `.[`）原樣通過。 */
+  private condValue(raw: string): string {
+    const t2 = raw.trim();
+    if (!t2) {
+      return "NULL";
+    }
+    if (/\.\[/.test(t2) || /^[A-Za-z_]\w*\.[A-Za-z_]/.test(t2)) {
+      return t2;
+    }
+    return this.literalText(t2);
+  }
+
+  private assignDsl(w: WorkItem, a: AssignRow): string {
     switch (a.kind) {
-      case "source":
-        return `[SOURCE].[${a.value}]`;
-      case "lookup":
-        return `${this.tableRef(w.condTable)}.[${a.value}]`;
-      case "literal":
-        return this.literalText(a.value);
       case "gen":
         return `Gen.${a.value || "GUID"}`;
+      case "field":
+        return `${a.alias || w.fromAlias}.[${a.column}]`;
+      case "literal":
+        return this.literalText(a.value);
       case "concat":
         return a.value.trim() || "NULL";
     }
+  }
+
+  private filterDsl(f: FilterRow): string {
+    const field = `${f.alias}.[${f.column}]`;
+    switch (f.op) {
+      case "IS EMPTY":
+      case "IS NOT EMPTY":
+        return `${field} ${f.op}`;
+      case "IN":
+      case "NOT IN": {
+        const list = f.values
+          .split(",")
+          .map((s) => s.trim())
+          .filter((s) => s)
+          .map((s) => this.condValue(s))
+          .join(", ");
+        return `${field} ${f.op} (${list})`;
+      }
+      case "BETWEEN":
+      case "NOT BETWEEN":
+        return `${field} ${f.op} ${this.condValue(f.low)} AND ${this.condValue(f.high)}`;
+      default: // == != > < >= <= LIKE NOT LIKE
+        return `${field} ${f.op} ${this.condValue(f.value)}`;
+    }
+  }
+
+  /** 篩選列是否完整可輸出（IS EMPTY 類僅需欄位）。 */
+  private filterReady(f: FilterRow): boolean {
+    if (!f.alias || !f.column) {
+      return false;
+    }
+    if (f.op === "IS EMPTY" || f.op === "IS NOT EMPTY") {
+      return true;
+    }
+    if (f.op === "IN" || f.op === "NOT IN") {
+      return f.values.trim().length > 0;
+    }
+    if (f.op === "BETWEEN" || f.op === "NOT BETWEEN") {
+      return f.low.trim().length > 0 && f.high.trim().length > 0;
+    }
+    return f.value.trim().length > 0;
+  }
+
+  private mergeRowDsl(w: WorkItem, r: MergeOnRow): string {
+    const rhs =
+      r.rhsKind === "field" ? `${r.rhsAlias}.[${r.rhsColumn}]` : this.condValue(r.rhsLiteral);
+    return `${w.intoAlias}.[${r.targetColumn}] ${r.op} ${rhs}`;
   }
 
   generateScript(): string {
@@ -418,19 +749,53 @@ export class WorksPage implements AfterViewInit, OnDestroy {
     }
     for (const w of this.works()) {
       lines.push(`WORK '${this.esc(w.name)}' {`);
-      if (w.useCondition && w.condSourceColumn && w.condTable && w.condColumn) {
-        lines.push(
-          `  If [SOURCE].[${w.condSourceColumn}] == ${this.tableRef(w.condTable)}.[${w.condColumn}]`,
-        );
+      lines.push(`  FROM ${w.fromAlias} = ${this.bindingDsl(w.fromConn, w.fromTable)}`);
+
+      for (const j of w.joins) {
+        const on = j.on
+          .filter((r) => r.leftAlias && r.leftColumn && r.rightColumn)
+          .map((r) => `${r.leftAlias}.[${r.leftColumn}] == ${j.alias}.[${r.rightColumn}]`)
+          .join(" && ");
+        const policy = j.policy === "left" ? "LEFT " : "";
+        lines.push(`  ${policy}JOIN ${j.alias} = ${this.bindingDsl(j.conn, j.table)} ON ( ${on} )`);
       }
-      lines.push(`  ${this.tableRef(w.targetTable)}`);
-      lines.push("  ADD {");
-      w.assigns
-        .filter((a) => a.targetColumn)
-        .forEach((a, i) => {
-          lines.push(`    ${i === 0 ? " " : ","}[${a.targetColumn}] = ${this.valueText(w, a)}`);
-        });
-      lines.push("  }");
+
+      // WHERE：simple → 由 filters 產生；進階（含 OR/NOT）→ 原樣輸出 raw
+      if (!w.whereSimple) {
+        if (w.whereRaw.trim()) {
+          lines.push(`  WHERE ${w.whereRaw.trim()}`);
+        }
+      } else {
+        const filters = w.filters.filter((f) => this.filterReady(f));
+        if (filters.length) {
+          lines.push(`  WHERE ${filters.map((f) => this.filterDsl(f)).join(" && ")}`);
+        }
+      }
+
+      const intoPrefix = w.intoAlias ? `${w.intoAlias} = ` : "";
+      lines.push(`  INTO ${intoPrefix}TARGET.${this.tableRef(w.intoTable)}`);
+
+      if (w.writeMode === "merge") {
+        const on = w.mergeOn
+          .filter((r) => r.targetColumn)
+          .map((r) => this.mergeRowDsl(w, r))
+          .join(" &&\n       ");
+        lines.push(`  ON ( ${on} )`);
+        if (w.notMatchedAction === "add") {
+          lines.push("  NOT MATCHED {");
+          this.pushAssignBlock(lines, w, w.assigns, "ADD", "    ");
+          lines.push("  }");
+        }
+        if (w.matchedAction === "update") {
+          lines.push("  MATCHED {");
+          this.pushAssignBlock(lines, w, w.matchedAssigns, "UPDATE", "    ");
+          lines.push("  }");
+        } else if (w.matchedAction === "delete") {
+          lines.push("  MATCHED { DELETE }");
+        }
+      } else {
+        this.pushAssignBlock(lines, w, w.assigns, "ADD", "  ");
+      }
       lines.push("}");
     }
     lines.push("GO");
@@ -438,17 +803,28 @@ export class WorksPage implements AfterViewInit, OnDestroy {
     return lines.join("\n");
   }
 
-  /**
-   * SOURCE 標頭行：對應上方工具列的「來源」選擇。
-   * 連線 → CONNECTION('名稱'[, TABLE/QUERY])；手動載入檔案 → FILE(...)；無來源 → null。
-   */
+  private pushAssignBlock(
+    lines: string[],
+    w: WorkItem,
+    assigns: AssignRow[],
+    verb: "ADD" | "UPDATE",
+    indent: string,
+  ): void {
+    lines.push(`${indent}${verb} {`);
+    assigns
+      .filter((a) => a.targetColumn)
+      .forEach((a, i) => {
+        lines.push(`${indent}  ${i === 0 ? " " : ","}[${a.targetColumn}] = ${this.assignDsl(w, a)}`);
+      });
+    lines.push(`${indent}}`);
+  }
+
   private effectiveSourceLine(): string | null {
     const conn = this.ws.sourceConnection();
     if (conn) {
       if (conn.kind === "file") {
         return `SOURCE = CONNECTION('${this.esc(conn.name)}')`;
       }
-      // 資料庫來源：資料表 / SQL 由「匯入資料」頁選定（屬於同一連線時才帶入）
       if (this.state.dbConnId() === conn.id) {
         const table = this.state.dbTable();
         if (table) {
@@ -478,16 +854,11 @@ export class WorksPage implements AfterViewInit, OnDestroy {
     return null;
   }
 
-  /** TARGET 標頭行：對應上方工具列的「目標」選擇。 */
   private effectiveTargetLine(): string | null {
     const conn = this.ws.targetConnection();
     return conn ? `TARGET = CONNECTION('${this.esc(conn.name)}')` : null;
   }
 
-  /**
-   * 文字模式的標頭同步：剔除前導區的舊 SOURCE / TARGET 行，
-   * 換上工具列對應的標頭。沒有權威值的部分保留原行（不吃掉手寫標頭）。
-   */
   private spliceHeader(text: string): string {
     const src = this.effectiveSourceLine();
     const tgt = this.effectiveTargetLine();
@@ -500,16 +871,16 @@ export class WorksPage implements AfterViewInit, OnDestroy {
     let oldTgt: string | null = null;
     let rest = 0;
     for (; rest < lines.length; rest++) {
-      const t = lines[rest].trim();
-      if (/^SOURCE\s*=/i.test(t)) {
+      const t2 = lines[rest].trim();
+      if (/^SOURCE\s*=/i.test(t2)) {
         oldSrc = lines[rest];
         continue;
       }
-      if (/^TARGET\s*=/i.test(t)) {
+      if (/^TARGET\s*=/i.test(t2)) {
         oldTgt = lines[rest];
         continue;
       }
-      if (t === "" || t.startsWith("--") || t.startsWith("//")) {
+      if (t2 === "" || t2.startsWith("--") || t2.startsWith("//")) {
         leading.push(lines[rest]);
         continue;
       }
@@ -522,7 +893,6 @@ export class WorksPage implements AfterViewInit, OnDestroy {
     return [...leading, ...header, "", ...lines.slice(rest)].join("\n");
   }
 
-  /** 工具列來源 / 目標變更時，讓文字模式編輯器中的標頭行跟著更新。 */
   private syncHeaderInEditor(): void {
     if (!this.view || !this.textMode()) {
       return;
@@ -547,12 +917,21 @@ export class WorksPage implements AfterViewInit, OnDestroy {
   addWork(): void {
     const item: WorkItem = {
       name: `作業 ${this.works().length + 1}`,
-      useCondition: false,
-      condSourceColumn: "",
-      condTable: "",
-      condColumn: "",
-      targetTable: "",
-      assigns: [{ targetColumn: "", kind: "source", value: "" }],
+      fromAlias: "src",
+      fromConn: "source",
+      fromTable: "",
+      joins: [],
+      whereSimple: true,
+      filters: [],
+      whereRaw: "",
+      intoAlias: "",
+      intoTable: "",
+      writeMode: "add",
+      mergeOn: [],
+      assigns: [{ targetColumn: "", kind: "field", alias: "src", column: "", value: "" }],
+      matchedAction: "skip",
+      matchedAssigns: [],
+      notMatchedAction: "add",
     };
     this.works.update((a) => [...a, item]);
     this.selectWork(this.works().length - 1);
@@ -564,59 +943,213 @@ export class WorksPage implements AfterViewInit, OnDestroy {
     this.selected.set(Math.min(this.selected(), n - 1));
   }
 
-  /** ngModel 直接改物件屬性；左欄名稱等清單顯示需重建陣列觸發更新。 */
   worksChanged(): void {
     this.works.update((a) => [...a]);
   }
 
-  addAssign(w: WorkItem): void {
-    w.assigns.push({ targetColumn: "", kind: "source", value: "" });
+  /** 主來源 / 別名 / 表變更後重載欄位建議。 */
+  worksChangedReload(): void {
+    this.worksChanged();
+    void this.refreshColumnsForSelected();
+  }
+
+  // 關聯表（JOIN）
+  addJoin(w: WorkItem): void {
+    const alias = this.uniqueAlias(w, "lookup");
+    w.joins.push({
+      alias,
+      conn: "target",
+      table: "",
+      policy: "inner",
+      on: [{ leftAlias: w.fromAlias, leftColumn: "", rightColumn: "" }],
+    });
+    this.worksChangedReload();
+  }
+
+  removeJoin(w: WorkItem, i: number): void {
+    w.joins.splice(i, 1);
+    this.worksChangedReload();
+  }
+
+  addJoinOn(j: JoinItem, w: WorkItem): void {
+    j.on.push({ leftAlias: w.fromAlias, leftColumn: "", rightColumn: "" });
     this.worksChanged();
   }
 
-  removeAssign(w: WorkItem, i: number): void {
-    w.assigns.splice(i, 1);
+  removeJoinOn(j: JoinItem, i: number): void {
+    j.on.splice(i, 1);
     this.worksChanged();
   }
 
-  /** 值來源切換：進「生成」給預設產生器；離開時清掉產生器名稱殘值。 */
-  onAssignKindChange(a: AssignRow, kind: AssignRow["kind"]): void {
+  // 篩選（WHERE）
+  addFilter(w: WorkItem): void {
+    w.filters.push({ ...this.blankFilter(), alias: w.fromAlias, op: "IS NOT EMPTY" });
+    this.worksChanged();
+  }
+
+  removeFilter(w: WorkItem, i: number): void {
+    w.filters.splice(i, 1);
+    this.worksChanged();
+  }
+
+  isEmptyOp(op: string): boolean {
+    return op === "IS EMPTY" || op === "IS NOT EMPTY";
+  }
+
+  isInOp(op: string): boolean {
+    return op === "IN" || op === "NOT IN";
+  }
+
+  isBetweenOp(op: string): boolean {
+    return op === "BETWEEN" || op === "NOT BETWEEN";
+  }
+
+  /** 單一值輸入（比較 / LIKE）；IS EMPTY 無值、IN 為清單、BETWEEN 為上下界。 */
+  opNeedsValue(op: string): boolean {
+    return !this.isEmptyOp(op) && !this.isInOp(op) && !this.isBetweenOp(op);
+  }
+
+  /** 進階條件（含 OR/NOT）→ 清空 raw，回到可視化 simple 編輯。 */
+  clearAdvancedWhere(w: WorkItem): void {
+    w.whereSimple = true;
+    w.whereRaw = "";
+    w.filters = [];
+    this.worksChanged();
+  }
+
+  // 寫入模式 / merge
+  onWriteModeChange(w: WorkItem, mode: "add" | "merge"): void {
+    w.writeMode = mode;
+    if (mode === "merge") {
+      if (!w.intoAlias) {
+        w.intoAlias = this.deriveAlias(w.intoTable, "mapping");
+      }
+      if (!w.mergeOn.length) {
+        w.mergeOn.push({
+          targetColumn: "",
+          op: "==",
+          rhsKind: "field",
+          rhsAlias: w.fromAlias,
+          rhsColumn: "",
+          rhsLiteral: "",
+        });
+      }
+    }
+    this.worksChangedReload();
+  }
+
+  addMergeOn(w: WorkItem): void {
+    w.mergeOn.push({
+      targetColumn: "",
+      op: "==",
+      rhsKind: "field",
+      rhsAlias: w.fromAlias,
+      rhsColumn: "",
+      rhsLiteral: "",
+    });
+    this.worksChanged();
+  }
+
+  removeMergeOn(w: WorkItem, i: number): void {
+    w.mergeOn.splice(i, 1);
+    this.worksChanged();
+  }
+
+  // 欄位指派（ADD / UPDATE 共用同一列模型）
+  addRow(w: WorkItem, list: AssignRow[]): void {
+    list.push({ targetColumn: "", kind: "field", alias: w.fromAlias, column: "", value: "" });
+    this.worksChanged();
+  }
+
+  removeRow(list: AssignRow[], i: number): void {
+    list.splice(i, 1);
+    this.worksChanged();
+  }
+
+  onAssignKindChange(w: WorkItem, a: AssignRow, kind: AssignRow["kind"]): void {
     a.kind = kind;
-    const isGenName = GENERATORS.some((g) => g.value === a.value);
-    if (kind === "gen" && !isGenName) {
+    if (kind === "gen" && !GENERATORS.some((g) => g.value === a.value)) {
       a.value = "GUID";
-    } else if (kind !== "gen" && isGenName) {
+    }
+    if (kind === "field" && !a.alias) {
+      a.alias = w.fromAlias;
+    }
+    if (kind !== "gen" && GENERATORS.some((g) => g.value === a.value)) {
       a.value = "";
     }
     this.worksChanged();
   }
 
-  /** 以欄名（不分大小寫）自動對應來源欄位 → 目標表欄位。 */
-  async autoMatch(): Promise<void> {
-    const w = this.selectedWork();
-    const preview = this.state.preview();
-    if (!w || !preview || !w.targetTable) {
-      return;
+  // merge 命中時動作（MATCHED）
+  onMatchedActionChange(w: WorkItem, action: "skip" | "update" | "delete"): void {
+    w.matchedAction = action;
+    if (action === "update" && !w.matchedAssigns.length) {
+      this.addRow(w, w.matchedAssigns);
     }
-    await this.refreshTargetColumns();
-    const byName = new Map(this.targetColumns().map((c) => [c.name.toLowerCase(), c]));
-    const rows: AssignRow[] = [];
-    for (const c of preview.columns) {
-      const hit = byName.get(c.name.toLowerCase());
-      if (hit) {
-        rows.push({ targetColumn: hit.name, kind: "source", value: c.name });
+    this.worksChanged();
+  }
+
+  // ---- 別名 / 欄位中繼資料 ----
+
+  /** 可作為值來源的別名（主來源 + 各關聯表）。 */
+  sourceAliases(w: WorkItem): string[] {
+    return [w.fromAlias, ...w.joins.map((j) => j.alias)].filter((a) => a);
+  }
+
+  /** 需要欄位建議的所有別名（含 INTO 別名供 merge 目標欄位）。 */
+  private allAliases(w: WorkItem): string[] {
+    const set = new Set<string>(this.sourceAliases(w));
+    if (w.intoAlias) {
+      set.add(w.intoAlias);
+    }
+    return [...set];
+  }
+
+  /** 渲染欄位建議 datalist 用的別名清單（樣板呼叫）。 */
+  datalistAliases(w: WorkItem): string[] {
+    return this.allAliases(w);
+  }
+
+  aliasListId(alias: string): string {
+    return "wal-" + alias;
+  }
+
+  columnsForAlias(alias: string): string[] {
+    return this.aliasCols()[alias] ?? [];
+  }
+
+  private aliasTable(w: WorkItem, alias: string): { conn: ConnKind; table: string } | null {
+    if (alias === w.fromAlias) {
+      return { conn: w.fromConn, table: w.fromTable };
+    }
+    const j = w.joins.find((x) => x.alias === alias);
+    if (j) {
+      return { conn: j.conn, table: j.table };
+    }
+    if (alias === w.intoAlias) {
+      return { conn: "target", table: w.intoTable };
+    }
+    return null;
+  }
+
+  private uniqueAlias(w: WorkItem, base: string): string {
+    const taken = this.allAliases(w).map((a) => a.toLowerCase());
+    if (!taken.includes(base)) {
+      return base;
+    }
+    for (let n = 2; ; n++) {
+      const cand = `${base}${n}`;
+      if (!taken.includes(cand)) {
+        return cand;
       }
-    }
-    if (rows.length) {
-      w.assigns = rows;
-      this.worksChanged();
-      this.log.info("作業", `${w.targetTable}：自動對應 ${rows.length} 欄`);
-    } else {
-      this.log.warn("作業", "沒有名稱相符的欄位（請先於「匯入資料」載入來源）");
     }
   }
 
-  // ---- 資料表 / 欄位中繼資料 ----
+  private deriveAlias(table: string, fallback: string): string {
+    const last = table.split(".").filter((p) => p).pop() ?? "";
+    const base = last.replace(/[^A-Za-z0-9_]/g, "").toLowerCase() || fallback;
+    return base;
+  }
 
   private async loadTables(connId: string | null): Promise<void> {
     this.tables.set([]);
@@ -630,8 +1163,8 @@ export class WorksPage implements AfterViewInit, OnDestroy {
     }
   }
 
-  tableKey(t: TableInfo): string {
-    return t.schema ? `${t.schema}.${t.name}` : t.name;
+  tableKey(t2: TableInfo): string {
+    return t2.schema ? `${t2.schema}.${t2.name}` : t2.name;
   }
 
   private async loadColumns(table: string): Promise<ColumnInfo[]> {
@@ -653,30 +1186,66 @@ export class WorksPage implements AfterViewInit, OnDestroy {
     }
   }
 
-  async refreshTargetColumns(): Promise<void> {
-    this.targetColumns.set(await this.loadColumns(this.selectedWork()?.targetTable ?? ""));
-  }
-
-  async refreshLookupColumns(): Promise<void> {
-    this.lookupColumns.set(await this.loadColumns(this.selectedWork()?.condTable ?? ""));
-  }
-
+  /** 重新整理目標欄位（INTO）+ 各別名的欄位建議。 */
   private async refreshColumnsForSelected(): Promise<void> {
-    await Promise.all([this.refreshTargetColumns(), this.refreshLookupColumns()]);
+    const w = this.selectedWork();
+    if (!w) {
+      this.targetColumns.set([]);
+      this.aliasCols.set({});
+      return;
+    }
+    this.targetColumns.set(await this.loadColumns(w.intoTable));
+    const map: Record<string, string[]> = {};
+    for (const alias of this.allAliases(w)) {
+      const at = this.aliasTable(w, alias);
+      if (!at) {
+        continue;
+      }
+      if (at.conn === "source" && alias === w.fromAlias) {
+        map[alias] = this.sourceColumnNames();
+      } else {
+        map[alias] = (await this.loadColumns(at.table)).map((c) => c.name);
+      }
+    }
+    this.aliasCols.set(map);
   }
 
   sourceColumnNames(): string[] {
     return this.state.preview()?.columns.map((c) => c.name) ?? [];
   }
 
-  // ---- 檔案 / 驗證 / 執行（沿用 ETL 腳本頁） ----
+  /** 以欄名（不分大小寫）自動對應來源欄位 → 目標表欄位。 */
+  async autoMatch(): Promise<void> {
+    const w = this.selectedWork();
+    const preview = this.state.preview();
+    if (!w || !preview || !w.intoTable) {
+      return;
+    }
+    await this.refreshColumnsForSelected();
+    const byName = new Map(this.targetColumns().map((c) => [c.name.toLowerCase(), c]));
+    const rows: AssignRow[] = [];
+    for (const c of preview.columns) {
+      const hit = byName.get(c.name.toLowerCase());
+      if (hit) {
+        rows.push({ targetColumn: hit.name, kind: "field", alias: w.fromAlias, column: c.name, value: "" });
+      }
+    }
+    if (rows.length) {
+      w.assigns = rows;
+      this.worksChanged();
+      this.log.info("作業", `${w.intoTable}：自動對應 ${rows.length} 欄`);
+    } else {
+      this.log.warn("作業", "沒有名稱相符的欄位（請先於「匯入資料」載入來源）");
+    }
+  }
+
+  // ---- 檔案 / 驗證 / 執行 ----
 
   etlFileName(): string {
     const p = this.currentFile();
     return p ? (p.split(/[/\\]/).pop() ?? p) : "未命名";
   }
 
-  /** 腳本來源摘要（與 SOURCE 標頭一致：工具列連線優先，其次手動載入的來源）。 */
   scriptSourceLabel(): string | null {
     const conn = this.ws.sourceConnection();
     if (conn) {
@@ -771,7 +1340,6 @@ export class WorksPage implements AfterViewInit, OnDestroy {
     if (this.output.running()) {
       return;
     }
-    // 工作區選擇作為回退；腳本內的 SOURCE / TARGET 標頭優先（後端解析）
     const connId = this.ws.targetConnId();
     const isDb = this.state.sourceKind() === "database";
     const dbQuery = this.state.dbQuery();

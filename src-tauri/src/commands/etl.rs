@@ -6,7 +6,10 @@ use crate::db;
 use crate::db::pool::AppState;
 use crate::etl::executor::{self, EtlProgress, EtlSummary};
 use crate::etl::mapping::{EtlJobConfig, SourceSpec};
-use crate::etl::script::ast::{ColRef, Expr, ScriptHeader, ScriptIssue, SourceDecl, Statement};
+use crate::etl::script::ast::{
+    self, Action, Assignment, Binding, ColRef, Condition, ConnRef, Expr, IntoClause, Join, Merge,
+    Script, ScriptIssue, SourceDecl, Work,
+};
 use crate::etl::script::executor::{ResolvedScriptJob, ScriptJobParams, ScriptSource};
 use crate::etl::script::{self, parser};
 use crate::etl::source_input;
@@ -52,8 +55,40 @@ pub struct ScriptCheck {
     pub issues: Vec<ScriptIssue>,
 }
 
+/// 走訪一個 work 的所有欄位參照（條件 + 動作）。
+fn work_col_refs(work: &Work) -> Vec<&ColRef> {
+    let mut v: Vec<&ColRef> = Vec::new();
+    for j in &work.joins {
+        v.extend(j.on.col_refs());
+    }
+    if let Some(w) = &work.where_ {
+        v.extend(w.col_refs());
+    }
+    if let Some(m) = &work.merge {
+        v.extend(m.on.col_refs());
+    }
+    for a in work.actions() {
+        for asn in a.assignments() {
+            v.extend(asn.value.col_refs());
+        }
+    }
+    v
+}
+
+/// 本 work 的 INSERT 指派（純 ADD 或 merge NOT MATCHED → ADD）。
+fn work_insert_add(work: &Work) -> Option<&[Assignment]> {
+    let action = match &work.merge {
+        Some(m) => m.not_matched.as_ref(),
+        None => work.action.as_ref(),
+    };
+    match action {
+        Some(Action::Add(a)) => Some(a.as_slice()),
+        _ => None,
+    }
+}
+
 /// 驗證 ETL 腳本：語法解析 + （若已載入來源檔）來源欄位存在性檢查。
-/// 資料表 / 欄位的 DB 端驗證在執行時進行。
+/// 資料表 / 查表欄位的 DB 端驗證在執行時進行。
 #[tauri::command]
 pub fn validate_etl_script(script: String, source_columns: Option<Vec<String>>) -> ScriptCheck {
     let parsed = match parser::parse(&script) {
@@ -68,44 +103,34 @@ pub fn validate_etl_script(script: String, source_columns: Option<Vec<String>>) 
     };
 
     let mut issues = Vec::new();
-    for stmt in &parsed.statements {
-        if stmt.assignments.is_empty() {
-            issues.push(ScriptIssue {
-                line: stmt.line,
-                message: format!(
-                    "作業「{}」沒有任何欄位指派，至少需要一個",
-                    stmt.name.as_deref().unwrap_or("-")
-                ),
-            });
-        }
-    }
-    if let Some(cols) = &source_columns {
-        let lower: Vec<String> = cols.iter().map(|c| c.to_lowercase()).collect();
-        let mut check = |name: &str, line: usize| {
-            if !lower.contains(&name.to_lowercase()) {
+    for work in &parsed.works {
+        // ADD 至少一個欄位指派
+        if let Some(add) = work_insert_add(work) {
+            if add.is_empty() {
                 issues.push(ScriptIssue {
-                    line,
-                    message: format!("來源沒有欄位 {name}（可用：{}）", cols.join(", ")),
+                    line: work.line,
+                    message: format!(
+                        "作業「{}」的 ADD 沒有任何欄位指派，至少需要一個",
+                        work.name.as_deref().unwrap_or("-")
+                    ),
                 });
             }
-        };
-        for stmt in &parsed.statements {
-            let (source_prefix, lookup_prefix) = match &stmt.condition {
-                Some(c) => {
-                    check(&c.left.column, c.line);
-                    (c.left.prefix_key(), Some(c.right.prefix_key()))
-                }
-                None => (String::new(), None),
-            };
-            for a in &stmt.assignments {
-                for r in a.value.col_refs() {
-                    let key = r.prefix_key();
-                    let is_lookup = lookup_prefix.as_deref() == Some(key.as_str());
-                    if !is_lookup
-                        && (key.is_empty() || key == source_prefix || stmt.condition.is_none())
-                    {
-                        check(&r.column, r.line);
-                    }
+        }
+    }
+
+    if let Some(cols) = &source_columns {
+        let lower: Vec<String> = cols.iter().map(|c| c.to_lowercase()).collect();
+        for work in &parsed.works {
+            let from_alias = work.from.alias.to_lowercase();
+            for r in work_col_refs(work) {
+                // 僅檢查主來源欄位；查表 / 目標欄位於執行時驗證
+                if r.alias.to_lowercase() == from_alias
+                    && !lower.contains(&r.column.to_lowercase())
+                {
+                    issues.push(ScriptIssue {
+                        line: r.line,
+                        message: format!("來源沒有欄位 {}（可用：{}）", r.column, cols.join(", ")),
+                    });
                 }
             }
         }
@@ -113,66 +138,58 @@ pub fn validate_etl_script(script: String, source_columns: Option<Vec<String>>) 
 
     ScriptCheck {
         ok: issues.is_empty(),
-        statement_count: parsed.statements.len(),
+        statement_count: parsed.works.len(),
         issues,
     }
 }
 
 // ---- 結構化腳本模型（「遷移作業」頁的視覺化編輯器） ----
 
-/// 欄位參照：prefix 為 0..3 段（[dbo].[Account].Id → prefix=["dbo","Account"]）。
+fn conn_label(c: ConnRef) -> &'static str {
+    match c {
+        ConnRef::Source => "source",
+        ConnRef::Target => "target",
+    }
+}
+
+/// 欄位參照：`別名.[欄位]`。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ColRefModel {
-    pub prefix: Vec<String>,
+    pub alias: String,
     pub column: String,
 }
 
 impl From<&ColRef> for ColRefModel {
     fn from(r: &ColRef) -> Self {
         ColRefModel {
-            prefix: r.prefix.clone(),
+            alias: r.alias.clone(),
             column: r.column.clone(),
         }
     }
 }
 
-/// 指派值（discriminated union，前端依 kind 分流）。
+/// 指派值 / 條件運算元（discriminated union，前端依 kind 分流）。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum ExprModel {
-    Col {
-        prefix: Vec<String>,
-        column: String,
-    },
-    Text {
-        value: String,
-    },
-    Int {
-        value: i64,
-    },
-    Float {
-        value: f64,
-    },
-    Bool {
-        value: bool,
-    },
+    Col { alias: String, column: String },
+    Text { value: String },
+    Int { value: i64 },
+    Float { value: f64 },
+    Bool { value: bool },
     Null,
     /// 產生器；name 為正規名稱（如 "ULID"、"GUID(Text)"）
-    Gen {
-        name: String,
-    },
-    /// 合成欄位；expr 為正規 DSL 文字（如 `N'前綴:' + [SOURCE].[Name]`）
-    Concat {
-        expr: String,
-    },
+    Gen { name: String },
+    /// 合成欄位；expr 為正規 DSL 文字（如 `N'前綴: {account.[Name]}'`）
+    Concat { expr: String },
 }
 
 impl From<&Expr> for ExprModel {
     fn from(e: &Expr) -> Self {
         match e {
             Expr::Col(r) => ExprModel::Col {
-                prefix: r.prefix.clone(),
+                alias: r.alias.clone(),
                 column: r.column.clone(),
             },
             Expr::Text(s) => ExprModel::Text { value: s.clone() },
@@ -190,9 +207,162 @@ impl From<&Expr> for ExprModel {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BindingModel {
+    pub alias: String,
+    pub conn: String,
+    pub table: Vec<String>,
+}
+
+impl From<&Binding> for BindingModel {
+    fn from(b: &Binding) -> Self {
+        BindingModel {
+            alias: b.alias.clone(),
+            conn: conn_label(b.conn).to_string(),
+            table: b.table.clone(),
+        }
+    }
+}
+
+/// 條件葉節點列（GUI 可視化編輯）。tag=kind。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum CondRowModel {
+    Cmp {
+        left: ExprModel,
+        op: String,
+        right: ExprModel,
+    },
+    Empty {
+        expr: ExprModel,
+        negated: bool,
+    },
+    In {
+        expr: ExprModel,
+        list: Vec<ExprModel>,
+        negated: bool,
+    },
+    Like {
+        expr: ExprModel,
+        pattern: ExprModel,
+        negated: bool,
+    },
+    Between {
+        expr: ExprModel,
+        low: ExprModel,
+        high: ExprModel,
+        negated: bool,
+    },
+}
+
+fn cond_row(c: &Condition) -> CondRowModel {
+    match c {
+        Condition::Compare(cmp) => CondRowModel::Cmp {
+            left: (&cmp.left).into(),
+            op: cmp.op.symbol().to_string(),
+            right: (&cmp.right).into(),
+        },
+        Condition::IsEmpty(e) => CondRowModel::Empty {
+            expr: (&e.expr).into(),
+            negated: e.negated,
+        },
+        Condition::In {
+            expr, list, negated, ..
+        } => CondRowModel::In {
+            expr: expr.into(),
+            list: list.iter().map(ExprModel::from).collect(),
+            negated: *negated,
+        },
+        Condition::Like {
+            expr, pattern, negated, ..
+        } => CondRowModel::Like {
+            expr: expr.into(),
+            pattern: pattern.into(),
+            negated: *negated,
+        },
+        Condition::Between {
+            expr, low, high, negated, ..
+        } => CondRowModel::Between {
+            expr: expr.into(),
+            low: low.into(),
+            high: high.into(),
+            negated: *negated,
+        },
+        // And / Or / Not 不會出現在 flat_rows
+        _ => CondRowModel::Cmp {
+            left: ExprModel::Null,
+            op: "==".into(),
+            right: ExprModel::Null,
+        },
+    }
+}
+
+/// 條件序列化：扁平 AND 的葉節點 → 可編輯 rows（simple=true）；
+/// 含 OR/NOT/巢狀 → simple=false，GUI 以 raw（DSL 文字）唯讀呈現。raw 永遠填，供 round-trip。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConditionModel {
-    pub left: ColRefModel,
-    pub right: ColRefModel,
+    pub simple: bool,
+    pub rows: Vec<CondRowModel>,
+    pub raw: String,
+}
+
+impl From<&Condition> for ConditionModel {
+    fn from(c: &Condition) -> Self {
+        let raw = c.to_dsl();
+        match c.flat_rows() {
+            Some(leaves) => ConditionModel {
+                simple: true,
+                rows: leaves.into_iter().map(cond_row).collect(),
+                raw,
+            },
+            None => ConditionModel {
+                simple: false,
+                rows: Vec::new(),
+                raw,
+            },
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JoinModel {
+    pub binding: BindingModel,
+    pub on: ConditionModel,
+    /// "inner" | "left"
+    pub policy: String,
+}
+
+impl From<&Join> for JoinModel {
+    fn from(j: &Join) -> Self {
+        JoinModel {
+            binding: (&j.binding).into(),
+            on: (&j.on).into(),
+            policy: match j.policy {
+                ast::JoinPolicy::Inner => "inner",
+                ast::JoinPolicy::Left => "left",
+            }
+            .to_string(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntoModel {
+    pub conn: String,
+    pub table: Vec<String>,
+    pub alias: Option<String>,
+}
+
+impl From<&IntoClause> for IntoModel {
+    fn from(i: &IntoClause) -> Self {
+        IntoModel {
+            conn: conn_label(i.conn).to_string(),
+            table: i.table.clone(),
+            alias: i.alias.clone(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -202,34 +372,74 @@ pub struct AssignmentModel {
     pub value: ExprModel,
 }
 
-/// 單一工作項目（WORK 區塊或舊式裸陳述式）。
+impl From<&Assignment> for AssignmentModel {
+    fn from(a: &Assignment) -> Self {
+        AssignmentModel {
+            target_column: a.target_column.clone(),
+            value: (&a.value).into(),
+        }
+    }
+}
+
+/// 動作：`{ kind: 'add'|'update'|'skip'|'delete', assignments }`。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionModel {
+    pub kind: String,
+    pub assignments: Vec<AssignmentModel>,
+}
+
+impl From<&Action> for ActionModel {
+    fn from(a: &Action) -> Self {
+        ActionModel {
+            kind: a.keyword().to_lowercase(),
+            assignments: a.assignments().iter().map(AssignmentModel::from).collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeModel {
+    pub on: ConditionModel,
+    pub matched: Option<ActionModel>,
+    pub not_matched: Option<ActionModel>,
+}
+
+impl From<&Merge> for MergeModel {
+    fn from(m: &Merge) -> Self {
+        MergeModel {
+            on: (&m.on).into(),
+            matched: m.matched.as_ref().map(ActionModel::from),
+            not_matched: m.not_matched.as_ref().map(ActionModel::from),
+        }
+    }
+}
+
+/// 單一工作項目（WORK 區塊或舊式相容陳述式正規化而來）。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkModel {
     pub name: Option<String>,
-    pub condition: Option<ConditionModel>,
-    /// 目標資料表的各段（前端以 `.` 連接顯示）
-    pub target_table: Vec<String>,
-    pub assignments: Vec<AssignmentModel>,
+    pub from: BindingModel,
+    pub joins: Vec<JoinModel>,
+    #[serde(rename = "where")]
+    pub where_: Option<ConditionModel>,
+    pub into: IntoModel,
+    pub merge: Option<MergeModel>,
+    pub action: Option<ActionModel>,
 }
 
-impl From<&Statement> for WorkModel {
-    fn from(s: &Statement) -> Self {
+impl From<&Work> for WorkModel {
+    fn from(w: &Work) -> Self {
         WorkModel {
-            name: s.name.clone(),
-            condition: s.condition.as_ref().map(|c| ConditionModel {
-                left: (&c.left).into(),
-                right: (&c.right).into(),
-            }),
-            target_table: s.target_table.clone(),
-            assignments: s
-                .assignments
-                .iter()
-                .map(|a| AssignmentModel {
-                    target_column: a.target_column.clone(),
-                    value: (&a.value).into(),
-                })
-                .collect(),
+            name: w.name.clone(),
+            from: (&w.from).into(),
+            joins: w.joins.iter().map(JoinModel::from).collect(),
+            where_: w.where_.as_ref().map(ConditionModel::from),
+            into: (&w.into).into(),
+            merge: w.merge.as_ref().map(MergeModel::from),
+            action: w.action.as_ref().map(ActionModel::from),
         }
     }
 }
@@ -261,7 +471,7 @@ pub struct ScriptModel {
     pub works: Vec<WorkModel>,
 }
 
-/// 解析腳本為結構化模型，供「遷移作業」頁的三欄視覺編輯器使用。
+/// 解析腳本為結構化模型，供「遷移作業」頁的視覺編輯器使用。
 #[tauri::command]
 pub fn parse_etl_script(script: String) -> Result<ScriptModel, EluEtlError> {
     let parsed = script::executor::run_blocking_parse(&script)?;
@@ -280,7 +490,7 @@ pub fn parse_etl_script(script: String) -> Result<ScriptModel, EluEtlError> {
             },
         }),
         target_connection: parsed.header.target_connection.clone(),
-        works: parsed.statements.iter().map(WorkModel::from).collect(),
+        works: parsed.works.iter().map(WorkModel::from).collect(),
     })
 }
 
@@ -301,12 +511,14 @@ async fn resolve_sheet(path: &str, sheet: Option<String>) -> Result<String, EluE
 
 /// 解析腳本標頭 + 工作區回退，產出目標連線與具體任務參數。
 /// 優先序：腳本 SOURCE/TARGET > 工作區選擇（params 內的值）。
+/// 資料庫來源若標頭未給 TABLE/QUERY，回退用第一個 work 的 FROM 表。
 async fn resolve_script_job(
     state: &AppState,
     params: &ScriptJobParams,
-    header: &ScriptHeader,
+    parsed: &Script,
 ) -> Result<(ConnectionConfig, ResolvedScriptJob), EluEtlError> {
     let store = state.store()?;
+    let header = &parsed.header;
 
     // 目標連線
     let target = match &header.target_connection {
@@ -329,7 +541,15 @@ async fn resolve_script_job(
         )));
     }
 
-    // 來源：檔案（inline / 檔案連線）或資料庫連線（TABLE / QUERY）
+    // 第一個 work 的 FROM 表（資料庫來源無 TABLE/QUERY 時回退用）
+    let from_table: Option<Vec<String>> = parsed
+        .works
+        .first()
+        .map(|w| &w.from)
+        .filter(|f| f.conn == ConnRef::Source && !f.table.is_empty())
+        .map(|f| f.table.clone());
+
+    // 來源：檔案（inline / 檔案連線）或資料庫連線（TABLE / QUERY / FROM 表）
     let source = match &header.source {
         Some(SourceDecl::File(f)) => ScriptSource::File {
             path: f.path.clone(),
@@ -353,19 +573,26 @@ async fn resolve_script_job(
                     encoding: conn.encoding,
                 }
             } else {
+                let dialect = db::dialect_for(conn.kind)?;
                 let query = match (&c.table, &c.query) {
-                    (Some(t), None) => format!(
-                        "SELECT * FROM {}",
-                        db::quote_table(db::dialect_for(conn.kind)?, t)?
-                    ),
-                    (None, Some(q)) => q.clone(),
-                    _ => {
-                        return Err(EluEtlError::Config(format!(
-                            "資料庫來源「{}」需指定 TABLE='schema.table' 或 \
-                             QUERY='SELECT ...'（擇一）",
-                            conn.name
-                        )))
+                    (Some(_), Some(_)) => {
+                        return Err(EluEtlError::Config("TABLE 與 QUERY 只能擇一".into()))
                     }
+                    (Some(t), None) => format!("SELECT * FROM {}", db::quote_table(dialect, t)?),
+                    (None, Some(q)) => q.clone(),
+                    (None, None) => match &from_table {
+                        Some(t) => format!(
+                            "SELECT * FROM {}",
+                            db::quote_table(dialect, &t.join("."))?
+                        ),
+                        None => {
+                            return Err(EluEtlError::Config(format!(
+                                "資料庫來源「{}」需指定 TABLE='schema.table'、QUERY='SELECT ...'，\
+                                 或於 FROM 子句指定來源表",
+                                conn.name
+                            )))
+                        }
+                    },
                 };
                 ScriptSource::Database {
                     driver: state.get_or_create_driver(conn.id).await?,
@@ -413,7 +640,7 @@ async fn resolve_script_job(
     ))
 }
 
-/// 執行 ETL 腳本（lookup join + 批次寫入；進度經 Channel 推送）。
+/// 執行 ETL 腳本（多 JOIN 查表 + WHERE + merge + 批次寫入；進度經 Channel 推送）。
 #[tauri::command]
 pub async fn execute_etl_script(
     state: tauri::State<'_, AppState>,
@@ -421,7 +648,7 @@ pub async fn execute_etl_script(
     on_progress: Channel<EtlProgress>,
 ) -> Result<EtlSummary, EluEtlError> {
     let parsed = script::executor::run_blocking_parse(&params.script)?;
-    let (target, resolved) = resolve_script_job(&state, &params, &parsed.header).await?;
+    let (target, resolved) = resolve_script_job(&state, &params, &parsed).await?;
     let dialect = db::dialect_for(target.kind)?;
     let driver = state.get_or_create_driver(target.id).await?;
 
@@ -431,7 +658,7 @@ pub async fn execute_etl_script(
         job_id = %job_id,
         target_conn = %target.name,
         source = %resolved.source.label(),
-        statements = parsed.statements.len(),
+        works = parsed.works.len(),
         "腳本任務開始"
     );
     let cancel = state.register_job(job_id);

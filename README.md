@@ -12,10 +12,10 @@ IBM DB2 為選用支援（`db2` feature），需另行安裝 IBM 驅動（見下
 - **零驅動依賴** — SQL Server（tiberius）、PostgreSQL / MySQL / SQLite（sqlx）皆為純 Rust 驅動，TLS 走 rustls
 - **IBM DB2（選用）** — 以 `ibm_db`（IBM CLI / ODBC 驅動）支援 DB2；非純 Rust，預設不編譯，需 `--features db2` 並安裝 IBM Data Server Driver。選擇 DB2 連線類型時自動偵測驅動，未就緒即提示安裝與下載連結
 - **檔案來源** — Excel（calamine）與 CSV（chardetng 自動偵測編碼，支援 Big5），查詢結果可匯出 xlsx（rust_xlsxwriter，常數記憶體模式）
-- **ETL 腳本 DSL** — 以 `WORK { … }` 描述遷移作業：lookup 比對、欄位指派、常值、`Gen.XXX` 產生器、`+` 合成欄位；`.etl` 檔自包含來源與目標宣告
+- **ETL 腳本 DSL** — 以 `WORK { … }` 描述遷移作業：lookup 比對、欄位指派、常值、`Gen.XXX` 產生器、`{…}` 字串模板合成欄位；`.etl` 檔自包含來源與目標宣告
 - **企業級執行語意** — 批次交易 + checkpoint 續跑、可取消、錯誤政策（續跑 / 首錯即停 / 錯誤率上限）、錯誤明細報告
 - **安全設計** — 密碼一律存 OS keychain（keyring），絕不寫入腳本或設定檔；identifier 白名單驗證防 SQL 注入；自簽憑證信任需明確勾選並記入審計日誌
-- **VSCode 風格介面** — 深色專業 UI、活動列導覽、輸出面板、狀態列連線指示燈與即時 ETL 進度
+- **VSCode 風格介面** — 深色專業 UI、活動列導覽、分頁式輸出面板（輸出 / 診斷 / 結果）、狀態列連線指示燈與即時 ETL 進度
 
 ## 技術棧
 
@@ -96,15 +96,15 @@ SOURCE = FILE(TYPE=CSV, PATH='C:\data\users.csv', ENCODING='Big5', HEADER=TRUE)
 TARGET = CONNECTION('正式環境 ERP')
 
 WORK 'EluCloudAccount綁定EnterId' {
-If [SOURCE].userPrincipalName == [dbo].[DirectoryAccounts].Email
-[dbo].[ExternalIdentityMappings] ADD
-{
- Id = Gen.ULID
-,AccountId = [dbo].[DirectoryAccounts].Id
-,ExternalId = [SOURCE].id
-,ExternalSystemType = N'MICROSOFT_ENTRA_ID'
-,Description = N'ENTRA:' + [SOURCE].displayName
-}
+  If [SOURCE].[userPrincipalName] == [dbo].[DirectoryAccounts].[Email]
+  [dbo].[ExternalIdentityMappings]
+  ADD {
+     [Id] = Gen.ULID
+    ,[AccountId] = [dbo].[DirectoryAccounts].[Id]
+    ,[ExternalId] = [SOURCE].[id]
+    ,[ExternalSystemType] = N'MICROSOFT_ENTRA_ID'
+    ,[Label] = N'MICROSOFT_ENTRA_ID: {[dbo].[DirectoryAccounts].[DisplayName]}'
+  }
 }
 GO
 ```
@@ -120,7 +120,8 @@ GO
   - `SOURCE = CONNECTION('已儲存連線名稱' [, TABLE='…' | QUERY='…'])`
   - `TARGET = CONNECTION('已儲存連線名稱')` — 僅支援引用已儲存連線，密碼留在 keychain
 - 工作項目以 `WORK '名稱' { … }` 包裹（舊式 `GO` 分隔仍相容）；`If` 條件可省略（全部插入）
-- 指派值可為：來源 / 比對表欄位、`N'文字'`、數字、`TRUE` / `FALSE` / `NULL`、產生器、`+` 串接合成欄位
+- 指派值可為：來源 / 比對表欄位、`N'文字'`、數字、`TRUE` / `FALSE` / `NULL`、產生器，或**字串模板合成欄位**
+- **字串模板**（合成欄位）：`N'前綴: {[SOURCE].[欄位]} 尾碼'` —— 固定文字直接寫，動態值（欄位 / 比對表欄位 / `Gen.XXX` / 數值）放在 `{…}` 內，各項轉文字後串接（`NULL` 視為空字串）；字面大括號以 `{{` / `}}` 跳脫。舊式 `'前綴' + [欄位]` 串接仍可解析，會正規化為模板形式
 
 ### `Gen.XXX` 產生器
 

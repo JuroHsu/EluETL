@@ -1,37 +1,43 @@
-//! ETL 腳本 DSL 的抽象語法樹。
+//! ETL 腳本 DSL v0.2 的抽象語法樹（子句化）。
 //!
-//! 語法範例（工作項目以 `WORK '名稱' { … }` 包裹；舊式 GO 分隔仍相容）：
+//! 工作主體為一組有序子句：
+//! ```text
+//! FROM → JOIN* → WHERE? → INTO → (ON → MATCHED?/NOT MATCHED?)? → ADD/UPDATE
+//! ```
+//! 範例（查表 + 新增）：
 //! ```text
 //! WORK 'EluCloudAccount綁定EnterId' {
-//! If [SOURCE].email == [dbo].[Account].email
-//! [dbo].[ExternalIdentityMappings] ADD
-//! {
-//!  AccountId = [dbo].[Account].Id
-//! ,ExternalId = [SOURCE].Id
-//! ,ExternalSystemType = N'MICROSOFT_ENTRA_ID'
+//!   FROM entra   = SOURCE.[users]
+//!   JOIN account = TARGET.[dbo].[DirectoryAccounts]
+//!     ON (entra.[userPrincipalName] == account.[Email])
+//!   INTO TARGET.[dbo].[ExternalIdentityMappings]
+//!   ADD {
+//!      [Id]                 = Gen.ULID
+//!     ,[AccountId]          = account.[Id]
+//!     ,[ExternalId]         = entra.[id]
+//!     ,[ExternalSystemType] = N'MICROSOFT_ENTRA_ID'
+//!     ,[Label]              = N'MICROSOFT_ENTRA_ID: {account.[DisplayName]}'
+//!   }
 //! }
-//! }
-//! GO
 //! ```
-//! 語意：來源每一行，以 email 比對 DB 資料表 Account（hash lookup，
-//! 文字不分大小寫），命中者組裝欄位後 INSERT 到目標表；未命中進錯誤報告。
+//! 兩種「對應」分開：`JOIN … ON` 是 join key（查表，少一筆＝查無對應）；
+//! 頂層 `ON` 是 merge key（去重，少一筆＝目標尚未存在 → 該寫入）。
+//!
+//! 舊式 `If … 換行 [表] ADD {…}` 與裸 `[表] ADD {…}` 仍相容解析，
+//! parser 會正規化為本檔的新 AST（欄位一律 alias 限定）。
 
-/// 欄位參照：`prefix.column`，prefix 為 0..3 段（識別來源檔或 DB 資料表）。
+/// 欄位參照：`alias.[column]`；alias 對應某個 FROM / JOIN / INTO 綁定。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColRef {
-    pub prefix: Vec<String>,
+    pub alias: String,
     pub column: String,
     pub line: usize,
 }
 
 impl ColRef {
-    /// 正規化 prefix（小寫、以 . 連接），供來源 / lookup 歸屬比對。
-    pub fn prefix_key(&self) -> String {
-        self.prefix
-            .iter()
-            .map(|p| p.to_lowercase())
-            .collect::<Vec<_>>()
-            .join(".")
+    /// 正規化別名（小寫），供綁定歸屬比對。
+    pub fn alias_key(&self) -> String {
+        self.alias.to_lowercase()
     }
 }
 
@@ -100,7 +106,7 @@ impl GenKind {
          Date(Text)、DateTime(Text)、DateTimeOffset(Text)、SHA256、SHA512、MD5";
 }
 
-/// 指派值：欄位參照、字面值、產生器，或 `+` 合成欄位。
+/// 指派值 / 條件運算元：欄位參照、字面值、產生器，或 `{…}` 合成欄位。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Col(ColRef),
@@ -112,7 +118,7 @@ pub enum Expr {
     Gen(GenKind),
     /// 合成欄位（字串模板）：各項轉為文字後串接（NULL 視為空字串）。
     /// 來源語法為帶 `{…}` 插值的字串，動態值寫在大括號內，如
-    /// `N'MICROSOFT_ENTRA_ID: {[source].[displayName]}'`
+    /// `N'MICROSOFT_ENTRA_ID: {account.[DisplayName]}'`
     /// （舊式 `'前綴' + [欄位]` 串接仍可解析，會正規化為此模板形式）。
     Concat(Vec<Expr>),
 }
@@ -130,11 +136,8 @@ impl Expr {
     /// 正規 DSL 文字（視覺編輯器顯示 / 腳本產生用）。
     pub fn to_dsl(&self) -> String {
         match self {
-            Expr::Col(r) => {
-                let mut parts: Vec<String> = r.prefix.iter().map(|p| format!("[{p}]")).collect();
-                parts.push(format!("[{}]", r.column));
-                parts.join(".")
-            }
+            // 欄位一律 alias 限定：account.[Id]
+            Expr::Col(r) => format!("{}.[{}]", r.alias, r.column),
             Expr::Text(s) => format!("N'{}'", s.replace('\'', "''")),
             Expr::Int(v) => v.to_string(),
             Expr::Float(v) => v.to_string(),
@@ -142,7 +145,7 @@ impl Expr {
             Expr::Null => "NULL".to_string(),
             Expr::Gen(k) => format!("Gen.{}", k.label()),
             // 字串模板：固定文字直接寫入引號內，動態值（欄位 / Gen / 數值）放在 {…} 內；
-            // 字面大括號以 {{ }} 跳脫。如 N'MICROSOFT_ENTRA_ID: {[source].[displayName]}'
+            // 字面大括號以 {{ }} 跳脫。如 N'MICROSOFT_ENTRA_ID: {account.[DisplayName]}'
             Expr::Concat(parts) => {
                 let mut s = String::from("N'");
                 for p in parts {
@@ -178,23 +181,362 @@ pub struct Assignment {
     pub line: usize,
 }
 
-/// `IF <source>.<col> == <table>.<col>` 比對條件。
+/// 來源連線參照：FROM / JOIN / INTO 的 `SOURCE` / `TARGET`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnRef {
+    Source,
+    Target,
+}
+
+impl ConnRef {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ConnRef::Source => "SOURCE",
+            ConnRef::Target => "TARGET",
+        }
+    }
+}
+
+/// 別名綁定：`<alias> = <conn>.[…]`（FROM / JOIN）。
 #[derive(Debug, Clone, PartialEq)]
-pub struct Condition {
-    pub left: ColRef,
-    pub right: ColRef,
+pub struct Binding {
+    pub alias: String,
+    pub conn: ConnRef,
+    /// 資料表路徑各段（檔案來源可為空，作名目用途）
+    pub table: Vec<String>,
     pub line: usize,
 }
 
+/// 查表未命中政策。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinPolicy {
+    /// 未命中 → 該列進錯誤報告（預設，＝現況「啟用比對」行為）
+    Inner,
+    /// 未命中 → 該查表欄位取 NULL 照常寫（選用）
+    Left,
+}
+
+/// 查表 / Lookup join：`JOIN <alias> = <conn>.[…] ON (<條件>)`。
 #[derive(Debug, Clone, PartialEq)]
-pub struct Statement {
-    /// 工作項目名稱（`WORK '名稱' { … }`；舊式 GO 分隔的裸陳述式為 None）
-    pub name: Option<String>,
-    pub condition: Option<Condition>,
-    /// 目標資料表（1..3 段：[db].[schema].[table]）
-    pub target_table: Vec<String>,
-    pub assignments: Vec<Assignment>,
+pub struct Join {
+    pub binding: Binding,
+    pub on: Condition,
+    pub policy: JoinPolicy,
+}
+
+/// 寫入目標：`INTO [<alias> =] <conn>.[…]`（要用合併鍵時取別名供 `ON` 引用）。
+/// 命名避開 std `Into` trait。
+#[derive(Debug, Clone, PartialEq)]
+pub struct IntoClause {
+    pub conn: ConnRef,
+    pub table: Vec<String>,
+    pub alias: Option<String>,
     pub line: usize,
+}
+
+/// 比較運算子。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmpOp {
+    Eq,
+    Ne,
+    Gt,
+    Lt,
+    Ge,
+    Le,
+}
+
+impl CmpOp {
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            CmpOp::Eq => "==",
+            CmpOp::Ne => "!=",
+            CmpOp::Gt => ">",
+            CmpOp::Lt => "<",
+            CmpOp::Ge => ">=",
+            CmpOp::Le => "<=",
+        }
+    }
+}
+
+/// 單一比較式：`<左> <op> <右>`。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Comparison {
+    pub left: Expr,
+    pub op: CmpOp,
+    pub right: Expr,
+    pub line: usize,
+}
+
+/// 空值 / 空字串判斷：`<運算式> IS [NOT] EMPTY`。
+#[derive(Debug, Clone, PartialEq)]
+pub struct IsEmptyCheck {
+    pub expr: Expr,
+    /// true = `IS NOT EMPTY`
+    pub negated: bool,
+    pub line: usize,
+}
+
+/// 條件（JOIN ON / merge ON / WHERE 共用）：布林樹 + 比較 / IS [NOT] EMPTY / IN / LIKE / BETWEEN。
+/// 優先級：`||` < `&&` < `!` < 葉節點（解析時建樹）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Condition {
+    And(Vec<Condition>),
+    Or(Vec<Condition>),
+    Not(Box<Condition>),
+    Compare(Comparison),
+    IsEmpty(IsEmptyCheck),
+    /// `<expr> [NOT] IN (<list>)`
+    In {
+        expr: Expr,
+        list: Vec<Expr>,
+        negated: bool,
+        line: usize,
+    },
+    /// `<expr> [NOT] LIKE <pattern>`（`%` 多字元、`_` 單字元，不分大小寫）
+    Like {
+        expr: Expr,
+        pattern: Expr,
+        negated: bool,
+        line: usize,
+    },
+    /// `<expr> [NOT] BETWEEN <low> AND <high>`（含端點）
+    Between {
+        expr: Expr,
+        low: Expr,
+        high: Expr,
+        negated: bool,
+        line: usize,
+    },
+}
+
+impl Condition {
+    fn is_leaf(&self) -> bool {
+        matches!(
+            self,
+            Condition::Compare(_)
+                | Condition::IsEmpty(_)
+                | Condition::In { .. }
+                | Condition::Like { .. }
+                | Condition::Between { .. }
+        )
+    }
+
+    /// 走訪條件內所有欄位參照（遞迴）。
+    pub fn col_refs(&self) -> Vec<&ColRef> {
+        let mut out: Vec<&ColRef> = Vec::new();
+        match self {
+            Condition::And(v) | Condition::Or(v) => {
+                for c in v {
+                    out.extend(c.col_refs());
+                }
+            }
+            Condition::Not(c) => out.extend(c.col_refs()),
+            Condition::Compare(c) => {
+                out.extend(c.left.col_refs());
+                out.extend(c.right.col_refs());
+            }
+            Condition::IsEmpty(e) => out.extend(e.expr.col_refs()),
+            Condition::In { expr, list, .. } => {
+                out.extend(expr.col_refs());
+                for e in list {
+                    out.extend(e.col_refs());
+                }
+            }
+            Condition::Like { expr, pattern, .. } => {
+                out.extend(expr.col_refs());
+                out.extend(pattern.col_refs());
+            }
+            Condition::Between {
+                expr, low, high, ..
+            } => {
+                out.extend(expr.col_refs());
+                out.extend(low.col_refs());
+                out.extend(high.col_refs());
+            }
+        }
+        out
+    }
+
+    /// 若為「扁平 AND 的等值比較（或單一等值比較）」回傳等式清單，否則 None。
+    /// JOIN ON / merge ON 要求等值合取，藉此抽取 hash key。
+    pub fn as_eq_conjunction(&self) -> Option<Vec<&Comparison>> {
+        fn eq(c: &Condition) -> Option<&Comparison> {
+            match c {
+                Condition::Compare(cmp) if cmp.op == CmpOp::Eq => Some(cmp),
+                _ => None,
+            }
+        }
+        match self {
+            Condition::And(v) => v.iter().map(eq).collect(),
+            other => eq(other).map(|c| vec![c]),
+        }
+    }
+
+    /// 若為「扁平 AND 的葉節點（或單一葉節點）」回傳葉清單，否則 None（GUI 可視化判斷）。
+    pub fn flat_rows(&self) -> Option<Vec<&Condition>> {
+        match self {
+            Condition::And(v) if v.iter().all(Condition::is_leaf) => Some(v.iter().collect()),
+            other if other.is_leaf() => Some(vec![other]),
+            _ => None,
+        }
+    }
+
+    /// 正規 DSL 文字（raw 條件 round-trip）。優先級：Or=1 < And=2 < 葉/Not=3。
+    pub fn to_dsl(&self) -> String {
+        self.fmt_prec(0)
+    }
+
+    fn fmt_prec(&self, parent: u8) -> String {
+        let (prec, s) = match self {
+            Condition::Or(v) => (
+                1,
+                v.iter().map(|c| c.fmt_prec(1)).collect::<Vec<_>>().join(" || "),
+            ),
+            Condition::And(v) => (
+                2,
+                v.iter().map(|c| c.fmt_prec(2)).collect::<Vec<_>>().join(" && "),
+            ),
+            Condition::Not(c) => (3, format!("!{}", c.fmt_prec(3))),
+            Condition::Compare(c) => (
+                3,
+                format!("{} {} {}", c.left.to_dsl(), c.op.symbol(), c.right.to_dsl()),
+            ),
+            Condition::IsEmpty(e) => (
+                3,
+                format!(
+                    "{} IS {}EMPTY",
+                    e.expr.to_dsl(),
+                    if e.negated { "NOT " } else { "" }
+                ),
+            ),
+            Condition::In {
+                expr,
+                list,
+                negated,
+                ..
+            } => (
+                3,
+                format!(
+                    "{} {}IN ({})",
+                    expr.to_dsl(),
+                    if *negated { "NOT " } else { "" },
+                    list.iter().map(Expr::to_dsl).collect::<Vec<_>>().join(", ")
+                ),
+            ),
+            Condition::Like {
+                expr,
+                pattern,
+                negated,
+                ..
+            } => (
+                3,
+                format!(
+                    "{} {}LIKE {}",
+                    expr.to_dsl(),
+                    if *negated { "NOT " } else { "" },
+                    pattern.to_dsl()
+                ),
+            ),
+            Condition::Between {
+                expr,
+                low,
+                high,
+                negated,
+                ..
+            } => (
+                3,
+                format!(
+                    "{} {}BETWEEN {} AND {}",
+                    expr.to_dsl(),
+                    if *negated { "NOT " } else { "" },
+                    low.to_dsl(),
+                    high.to_dsl()
+                ),
+            ),
+        };
+        if prec < parent {
+            format!("({s})")
+        } else {
+            s
+        }
+    }
+}
+
+/// 寫入動作。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    Add(Vec<Assignment>),
+    Update(Vec<Assignment>),
+    Skip,
+    Delete,
+}
+
+impl Action {
+    /// 動作關鍵字（序列化 / 顯示用）。
+    pub fn keyword(&self) -> &'static str {
+        match self {
+            Action::Add(_) => "ADD",
+            Action::Update(_) => "UPDATE",
+            Action::Skip => "SKIP",
+            Action::Delete => "DELETE",
+        }
+    }
+
+    pub fn assignments(&self) -> &[Assignment] {
+        match self {
+            Action::Add(a) | Action::Update(a) => a,
+            Action::Skip | Action::Delete => &[],
+        }
+    }
+}
+
+/// 合併（MERGE / upsert）：頂層 `ON (<條件>)` + 分支。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Merge {
+    pub on: Condition,
+    pub matched: Option<Action>,
+    pub not_matched: Option<Action>,
+}
+
+/// 一個轉換工作單元（`WORK '名稱' { … }`，或舊式相容陳述式正規化而來）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Work {
+    pub name: Option<String>,
+    /// 主來源：逐列迭代的對象（決定 body 跑幾次）
+    pub from: Binding,
+    /// 查表（0..N）
+    pub joins: Vec<Join>,
+    /// 過濾
+    pub where_: Option<Condition>,
+    /// 寫入目標
+    pub into: IntoClause,
+    /// 合併語意（None → `action` 為純附加）
+    pub merge: Option<Merge>,
+    /// 無 merge 時的頂層動作（通常為 ADD）
+    pub action: Option<Action>,
+    pub line: usize,
+}
+
+impl Work {
+    /// 此工作所有別名綁定（FROM + JOIN；INTO 別名另計）。供正規化 / 執行歸屬。
+    pub fn source_bindings(&self) -> Vec<&Binding> {
+        let mut v = vec![&self.from];
+        v.extend(self.joins.iter().map(|j| &j.binding));
+        v
+    }
+
+    /// 此工作所有寫入動作（頂層 + merge 分支），供欄位走訪。
+    pub fn actions(&self) -> Vec<&Action> {
+        let mut v: Vec<&Action> = Vec::new();
+        if let Some(a) = &self.action {
+            v.push(a);
+        }
+        if let Some(m) = &self.merge {
+            v.extend(m.matched.iter());
+            v.extend(m.not_matched.iter());
+        }
+        v
+    }
 }
 
 /// SOURCE 宣告：inline 檔案參數，或以名稱引用已儲存的連線
@@ -234,7 +576,7 @@ pub struct ScriptHeader {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Script {
     pub header: ScriptHeader,
-    pub statements: Vec<Statement>,
+    pub works: Vec<Work>,
 }
 
 /// 解析 / 驗證錯誤（含行號，供編輯器標示）。

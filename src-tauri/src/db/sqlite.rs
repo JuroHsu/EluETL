@@ -161,4 +161,26 @@ impl DbDriver for SqliteDriver {
         tx.commit().await?;
         Ok(rows.len() as u64)
     }
+
+    async fn execute_batch(
+        &self,
+        sql: &str,
+        param_types: &[DataType],
+        param_rows: &[Vec<CellValue>],
+    ) -> Result<u64, EluEtlError> {
+        if param_rows.is_empty() {
+            return Ok(0);
+        }
+        let mut tx = self.pool().await?.begin().await?;
+        let mut affected = 0u64;
+        for row in param_rows {
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()));
+            for (cell, ty) in row.iter().zip(param_types) {
+                q = bind_cell!(q, cell, *ty);
+            }
+            affected += q.execute(&mut *tx).await?.rows_affected();
+        }
+        tx.commit().await?;
+        Ok(affected)
+    }
 }

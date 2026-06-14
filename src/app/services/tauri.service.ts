@@ -139,13 +139,16 @@ export interface ScriptCheck {
 
 // ---- 結構化腳本模型（「遷移作業」頁視覺編輯器；對應 Rust ScriptModel）----
 
+/** 來源連線參照：FROM / JOIN / INTO 的 SOURCE / TARGET。 */
+export type ConnKindModel = "source" | "target";
+
 export interface ColRefModel {
-  prefix: string[];
+  alias: string;
   column: string;
 }
 
 export type ExprModel =
-  | { kind: "col"; prefix: string[]; column: string }
+  | { kind: "col"; alias: string; column: string }
   | { kind: "text"; value: string }
   | { kind: "int"; value: number }
   | { kind: "float"; value: number }
@@ -154,11 +157,63 @@ export type ExprModel =
   | { kind: "gen"; name: string }
   | { kind: "concat"; expr: string };
 
+/** 別名綁定：`<alias> = <conn>.[…]`（FROM / JOIN）。 */
+export interface BindingModel {
+  alias: string;
+  conn: ConnKindModel;
+  table: string[];
+}
+
+/** 條件葉節點列（GUI 可視化編輯）。 */
+export type CondRowModel =
+  | { kind: "cmp"; left: ExprModel; op: string; right: ExprModel }
+  | { kind: "empty"; expr: ExprModel; negated: boolean }
+  | { kind: "in"; expr: ExprModel; list: ExprModel[]; negated: boolean }
+  | { kind: "like"; expr: ExprModel; pattern: ExprModel; negated: boolean }
+  | { kind: "between"; expr: ExprModel; low: ExprModel; high: ExprModel; negated: boolean };
+
+/**
+ * 條件（JOIN ON / merge ON / WHERE）。
+ * simple=true：扁平 AND，可用 rows 編輯；simple=false：含 OR/NOT，以 raw（DSL）唯讀呈現。
+ * raw 永遠填，供 round-trip。
+ */
+export interface ConditionModel {
+  simple: boolean;
+  rows: CondRowModel[];
+  raw: string;
+}
+
+export interface JoinModel {
+  binding: BindingModel;
+  on: ConditionModel;
+  policy: "inner" | "left";
+}
+
+export interface IntoModel {
+  conn: ConnKindModel;
+  table: string[];
+  alias: string | null;
+}
+
+export interface ActionModel {
+  kind: "add" | "update" | "skip" | "delete";
+  assignments: { targetColumn: string; value: ExprModel }[];
+}
+
+export interface MergeModel {
+  on: ConditionModel;
+  matched: ActionModel | null;
+  notMatched: ActionModel | null;
+}
+
 export interface ScriptWorkModel {
   name: string | null;
-  condition: { left: ColRefModel; right: ColRefModel } | null;
-  targetTable: string[];
-  assignments: { targetColumn: string; value: ExprModel }[];
+  from: BindingModel;
+  joins: JoinModel[];
+  where: ConditionModel | null;
+  into: IntoModel;
+  merge: MergeModel | null;
+  action: ActionModel | null;
 }
 
 export type ScriptSourceModel =

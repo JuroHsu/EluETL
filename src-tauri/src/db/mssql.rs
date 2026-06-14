@@ -293,4 +293,46 @@ impl DbDriver for MssqlDriver {
             }
         }
     }
+
+    async fn execute_batch(
+        &self,
+        sql: &str,
+        param_types: &[DataType],
+        param_rows: &[Vec<CellValue>],
+    ) -> Result<u64, EluEtlError> {
+        if param_rows.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.get_conn().await?;
+        conn.simple_query("BEGIN TRAN")
+            .await?
+            .into_results()
+            .await?;
+
+        let work = async {
+            let mut affected = 0u64;
+            for row in param_rows {
+                let params: Vec<MssqlParam> = row
+                    .iter()
+                    .zip(param_types)
+                    .map(|(cell, ty)| MssqlParam { cell, ty: *ty })
+                    .collect();
+                let refs: Vec<&dyn ToSql> = params.iter().map(|p| p as &dyn ToSql).collect();
+                let res = conn.execute(sql, &refs).await?;
+                affected += res.rows_affected().iter().sum::<u64>();
+            }
+            Ok::<u64, EluEtlError>(affected)
+        };
+
+        match work.await {
+            Ok(n) => {
+                conn.simple_query("COMMIT").await?.into_results().await?;
+                Ok(n)
+            }
+            Err(e) => {
+                let _ = conn.simple_query("ROLLBACK").await;
+                Err(e)
+            }
+        }
+    }
 }

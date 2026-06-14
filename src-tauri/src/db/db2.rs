@@ -176,8 +176,10 @@ mod imp {
     }
 
     /// 將 DB2 / ODBC 診斷紀錄轉為統一錯誤；不含連線字串等機密。
-    fn db2_err<E: std::fmt::Display>(e: E) -> EluEtlError {
-        EluEtlError::Db(format!("DB2: {e}"))
+    /// 用 Debug 而非 Display：`create_environment_v3` / `connect_with_connection_string`
+    /// 的錯誤型別為 `Option<DiagnosticRecord>`（無 Display 實作）。
+    fn db2_err<E: std::fmt::Debug>(e: E) -> EluEtlError {
+        EluEtlError::Db(format!("DB2: {e:?}"))
     }
 
     /// 字串字面值：標準 SQL 轉義（單引號加倍），並剔除 NUL。
@@ -292,6 +294,45 @@ mod imp {
 
             let conn_str = self.conn_str.expose().to_string();
             let total = rows.len() as u64;
+            tokio::task::spawn_blocking(move || -> Result<(), EluEtlError> {
+                let env = create_environment_v3().map_err(db2_err)?;
+                let conn = env
+                    .connect_with_connection_string(&conn_str)
+                    .map_err(db2_err)?;
+                for sql in &statements {
+                    let stmt = Statement::with_parent(&conn).map_err(db2_err)?;
+                    stmt.exec_direct(sql).map_err(db2_err)?;
+                }
+                Ok(())
+            })
+            .await??;
+            Ok(total)
+        }
+
+        async fn execute_batch(
+            &self,
+            sql: &str,
+            _param_types: &[DataType],
+            param_rows: &[Vec<CellValue>],
+        ) -> Result<u64, EluEtlError> {
+            if param_rows.is_empty() {
+                return Ok(0);
+            }
+            // 本驅動不綁定參數：把 SQL 內的 `?` 依序換成 inline literal。
+            let mut statements: Vec<String> = Vec::with_capacity(param_rows.len());
+            for row in param_rows {
+                let mut segments = sql.split('?');
+                let mut out = String::new();
+                out.push_str(segments.next().unwrap_or(""));
+                for (cell, seg) in row.iter().zip(segments) {
+                    out.push_str(&sql_literal(cell));
+                    out.push_str(seg);
+                }
+                statements.push(out);
+            }
+
+            let conn_str = self.conn_str.expose().to_string();
+            let total = param_rows.len() as u64;
             tokio::task::spawn_blocking(move || -> Result<(), EluEtlError> {
                 let env = create_environment_v3().map_err(db2_err)?;
                 let conn = env

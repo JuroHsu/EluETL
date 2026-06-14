@@ -181,6 +181,37 @@ pub fn placeholders_mssql(nrows: usize, ncols: usize) -> String {
     s
 }
 
+/// 單一參數 placeholder（依方言）：PG `$n`、MSSQL `@Pn`、其餘 `?`。
+pub fn placeholder(dialect: Dialect, idx: usize) -> String {
+    match dialect {
+        Dialect::Postgres => format!("${idx}"),
+        Dialect::Mssql => format!("@P{idx}"),
+        Dialect::MySql | Dialect::Sqlite | Dialect::Db2 => "?".to_string(),
+    }
+}
+
+/// 組 `col = <ph>` 子句（SET 用 `sep=", "`，WHERE 用 `sep=" AND "`）；
+/// placeholder 從 `start_idx` 起遞增，回傳 (子句, 下一個序號)。
+pub fn equality_clause(
+    dialect: Dialect,
+    columns: &[String],
+    start_idx: usize,
+    sep: &str,
+) -> Result<(String, usize), EluEtlError> {
+    let mut parts = Vec::with_capacity(columns.len());
+    let mut idx = start_idx;
+    for c in columns {
+        validate_ident(c)?;
+        parts.push(format!(
+            "{} = {}",
+            quote_ident(dialect, c),
+            placeholder(dialect, idx)
+        ));
+        idx += 1;
+    }
+    Ok((parts.join(sep), idx))
+}
+
 /// sqlx 動態綁定：依 CellValue 綁定原生型別；NULL 依目標型別綁定，
 /// 確保 DB 端拿到正確型別的 NULL（PG 對 text NULL → date 欄位會報錯）。
 #[macro_export]

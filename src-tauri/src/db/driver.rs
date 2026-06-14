@@ -42,4 +42,15 @@ pub trait DbDriver: Send + Sync {
         types: &[DataType],
         rows: &[Vec<CellValue>],
     ) -> Result<u64, EluEtlError>;
+
+    /// 以單一交易執行一批參數化的非查詢語句（UPDATE / DELETE）。
+    /// `sql` 為含方言 placeholder 的單列語句（如 `UPDATE t SET c=$1 WHERE k=$2`），
+    /// 對 `param_rows` 每列逐次套用；`param_types[i]` 為第 i 個 placeholder 的型別。
+    /// 回傳影響行數總和。
+    async fn execute_batch(
+        &self,
+        sql: &str,
+        param_types: &[DataType],
+        param_rows: &[Vec<CellValue>],
+    ) -> Result<u64, EluEtlError>;
 }

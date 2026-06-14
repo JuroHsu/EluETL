@@ -33,7 +33,7 @@
   <!-- 文字模式：CodeMirror 編輯器（常駐 DOM，隱藏切換） -->
   <div #editorHost class="min-h-0 flex-1 overflow-hidden" [class.hidden]="!textMode()"></div>
 
-  <!-- 視覺模式：工作項目 / 判斷邏輯 / 執行作業 -->
+  <!-- 視覺模式：工作項目 / 來源與關聯 + 篩選 / 執行作業 -->
   @if (!textMode()) {
     <div class="flex min-h-0 flex-1">
       <!-- 左：工作項目 -->
@@ -71,172 +71,342 @@
       </aside>
 
       @if (selectedWork(); as w) {
-        <!-- 中：判斷邏輯 -->
-        <section class="flex w-80 shrink-0 flex-col gap-3 overflow-auto border-r border-vs-border p-3">
-          <span class="text-[11px] tracking-widest text-vs-muted uppercase">判斷邏輯</span>
-
+        <!-- 中：來源與關聯（FROM / JOIN）+ 篩選（WHERE） -->
+        <section class="flex w-96 shrink-0 flex-col gap-3 overflow-auto border-r border-vs-border p-3">
           <label class="flex flex-col gap-1 text-[11px] text-vs-muted">
             作業名稱
             <input [(ngModel)]="w.name" (ngModelChange)="worksChanged()" class="vs-input h-6 text-xs" />
           </label>
 
-          <label class="flex items-center gap-1.5 text-[11px] text-vs-muted">
-            <input type="checkbox" [(ngModel)]="w.useCondition" class="accent-vs-accent" />
-            啟用比對（IF 命中才寫入，未命中進錯誤報告）
-          </label>
+          <span class="text-[11px] tracking-widest text-vs-muted uppercase">來源與關聯（FROM / JOIN）</span>
 
-          @if (w.useCondition) {
-            <label class="flex flex-col gap-1 text-[11px] text-vs-muted">
-              來源欄位
+          <!-- 主來源 FROM -->
+          <div class="flex flex-col gap-1 rounded border border-vs-border p-2">
+            <span class="text-[11px] text-vs-text">主來源（逐列迭代）</span>
+            <div class="flex items-center gap-1 text-xs">
               <input
-                [(ngModel)]="w.condSourceColumn"
-                list="works-src-columns"
-                placeholder="email"
-                class="vs-input h-6 text-xs"
+                [(ngModel)]="w.fromAlias"
+                (ngModelChange)="worksChangedReload()"
+                placeholder="別名"
+                title="主來源別名（如 entra）"
+                class="vs-input h-6 w-20"
               />
-            </label>
-
-            <div class="text-center text-xs text-vs-muted">==</div>
-
-            <label class="flex flex-col gap-1 text-[11px] text-vs-muted">
-              比對資料表（目標資料庫）
+              <span>=</span>
+              <select [(ngModel)]="w.fromConn" (ngModelChange)="worksChangedReload()" class="vs-input h-6 w-20">
+                <option value="source">SOURCE</option>
+                <option value="target">TARGET</option>
+              </select>
+              <span>.</span>
               <input
-                [(ngModel)]="w.condTable"
-                (change)="refreshLookupColumns()"
+                [(ngModel)]="w.fromTable"
+                (ngModelChange)="worksChangedReload()"
                 list="works-db-tables"
-                placeholder="dbo.DirectoryAccounts"
-                class="vs-input h-6 text-xs"
+                placeholder="users"
+                class="vs-input h-6 flex-1"
               />
-            </label>
+            </div>
+          </div>
 
-            <label class="flex flex-col gap-1 text-[11px] text-vs-muted">
-              比對欄位
-              <input
-                [(ngModel)]="w.condColumn"
-                list="works-lookup-columns"
-                placeholder="email"
-                class="vs-input h-6 text-xs"
-              />
-            </label>
+          <!-- 關聯表 JOIN -->
+          @for (j of w.joins; track $index; let ji = $index) {
+            <div class="flex flex-col gap-1 rounded border border-vs-border p-2">
+              <div class="flex items-center justify-between">
+                <span class="text-[11px] text-vs-text">關聯表 {{ ji + 1 }}（查表）</span>
+                <button type="button" (click)="removeJoin(w, ji)" title="刪除關聯表" class="text-vs-muted hover:text-vs-error">✕</button>
+              </div>
+              <div class="flex items-center gap-1 text-xs">
+                <input [(ngModel)]="j.alias" (ngModelChange)="worksChangedReload()" placeholder="別名" class="vs-input h-6 w-20" />
+                <span>=</span>
+                <select [(ngModel)]="j.conn" (ngModelChange)="worksChangedReload()" class="vs-input h-6 w-20">
+                  <option value="target">TARGET</option>
+                  <option value="source">SOURCE</option>
+                </select>
+                <span>.</span>
+                <input
+                  [(ngModel)]="j.table"
+                  (ngModelChange)="worksChangedReload()"
+                  list="works-db-tables"
+                  placeholder="dbo.DirectoryAccounts"
+                  class="vs-input h-6 flex-1"
+                />
+              </div>
+              @for (r of j.on; track $index; let ri = $index) {
+                <div class="flex items-center gap-1 text-xs">
+                  <select [(ngModel)]="r.leftAlias" (ngModelChange)="worksChanged()" class="vs-input h-6 w-20">
+                    @for (al of sourceAliases(w); track al) {
+                      <option [value]="al">{{ al }}</option>
+                    }
+                  </select>
+                  <span>.</span>
+                  <input [(ngModel)]="r.leftColumn" (ngModelChange)="worksChanged()" [attr.list]="aliasListId(r.leftAlias)" placeholder="欄位" class="vs-input h-6 w-24" />
+                  <span>==</span>
+                  <span class="truncate text-vs-muted">{{ j.alias }}.</span>
+                  <input [(ngModel)]="r.rightColumn" (ngModelChange)="worksChanged()" [attr.list]="aliasListId(j.alias)" placeholder="欄位" class="vs-input h-6 w-24" />
+                  <button type="button" (click)="removeJoinOn(j, ri)" class="text-vs-muted hover:text-vs-error">✕</button>
+                </div>
+              }
+              <div class="flex items-center justify-between">
+                <button type="button" (click)="addJoinOn(j, w)" class="vs-btn-secondary h-5 px-1.5 text-xs">＋ 條件</button>
+                <label class="flex items-center gap-1 text-[11px] text-vs-muted">
+                  未命中
+                  <select [(ngModel)]="j.policy" (ngModelChange)="worksChanged()" class="vs-input h-6 text-xs">
+                    <option value="inner">進錯誤報告</option>
+                    <option value="left">取空值照寫</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+          }
+          <button type="button" (click)="addJoin(w)" class="vs-btn-secondary h-6 self-start">＋ 新增關聯表</button>
 
-            <p class="text-[11px] leading-4 text-vs-muted">
-              比對為 hash lookup，文字不分大小寫；命中列可在右側以「比對表欄位」取值。
-            </p>
+          <!-- 篩選 WHERE -->
+          <span class="mt-2 text-[11px] tracking-widest text-vs-muted uppercase">篩選（WHERE）</span>
+          @if (!w.whereSimple) {
+            <!-- 進階條件（含 OR / NOT）：raw 唯讀，需用文字模式編輯 -->
+            <textarea
+              [ngModel]="w.whereRaw"
+              readonly
+              rows="2"
+              class="vs-input w-full font-mono text-xs"
+              title="含 OR / NOT 的進階條件無法可視化編輯，請切換文字編輯修改"
+            ></textarea>
+            <button type="button" (click)="clearAdvancedWhere(w)" class="vs-btn-secondary h-6 self-start" title="清除進階條件，改用可視化篩選">
+              改用可視化篩選（清除）
+            </button>
           } @else {
-            <p class="text-[11px] leading-4 text-vs-muted">
-              未啟用比對：來源每一行都會寫入目標資料表。
-            </p>
+            @for (f of w.filters; track $index; let fi = $index) {
+              <div class="flex flex-wrap items-center gap-1 text-xs">
+                <select [(ngModel)]="f.alias" (ngModelChange)="worksChanged()" class="vs-input h-6 w-20">
+                  @for (al of sourceAliases(w); track al) {
+                    <option [value]="al">{{ al }}</option>
+                  }
+                </select>
+                <span>.</span>
+                <input [(ngModel)]="f.column" (ngModelChange)="worksChanged()" [attr.list]="aliasListId(f.alias)" placeholder="欄位" class="vs-input h-6 w-24" />
+                <select [(ngModel)]="f.op" (ngModelChange)="worksChanged()" class="vs-input h-6">
+                  @for (op of condOps; track op) {
+                    <option [value]="op">{{ op }}</option>
+                  }
+                </select>
+                @if (isInOp(f.op)) {
+                  <input [(ngModel)]="f.values" (ngModelChange)="worksChanged()" placeholder="值1, 值2, …" class="vs-input h-6 w-36" />
+                } @else if (isBetweenOp(f.op)) {
+                  <input [(ngModel)]="f.low" (ngModelChange)="worksChanged()" placeholder="下界" class="vs-input h-6 w-16" />
+                  <span>AND</span>
+                  <input [(ngModel)]="f.high" (ngModelChange)="worksChanged()" placeholder="上界" class="vs-input h-6 w-16" />
+                } @else if (opNeedsValue(f.op)) {
+                  <input [(ngModel)]="f.value" (ngModelChange)="worksChanged()" placeholder="值（LIKE 用 N'%樣式%'）" class="vs-input h-6 w-28" />
+                }
+                <button type="button" (click)="removeFilter(w, fi)" class="text-vs-muted hover:text-vs-error">✕</button>
+              </div>
+            }
+            <button type="button" (click)="addFilter(w)" class="vs-btn-secondary h-6 self-start">＋ 新增條件（AND 串接）</button>
           }
         </section>
 
-        <!-- 右：執行作業 -->
+        <!-- 右：執行作業（INTO + 寫入模式） -->
         <section class="flex min-w-0 flex-1 flex-col gap-2 overflow-auto p-3">
           <div class="flex items-center gap-2">
-            <span class="text-[11px] tracking-widest text-vs-muted uppercase">執行作業</span>
+            <span class="text-[11px] tracking-widest text-vs-muted uppercase">執行作業（INTO）</span>
             <div class="ml-auto flex items-center gap-2">
               <button
                 type="button"
                 (click)="autoMatch()"
-                [disabled]="!w.targetTable || !state.preview()"
+                [disabled]="!w.intoTable || !state.preview()"
                 title="以欄名自動對應來源欄位（需先於「匯入資料」載入來源）"
                 class="vs-btn-secondary h-6"
               >
                 自動對應
               </button>
-              <button type="button" (click)="addAssign(w)" class="vs-btn-secondary h-6">＋ 新增欄位</button>
             </div>
           </div>
 
-          <label class="flex items-center gap-1.5 text-[11px] text-vs-muted">
-            目標資料表
+          <div class="flex flex-wrap items-center gap-1 text-xs">
+            <span>目標資料表</span>
+            <span class="text-vs-muted">TARGET .</span>
             <input
-              [(ngModel)]="w.targetTable"
-              (change)="refreshTargetColumns()"
+              [(ngModel)]="w.intoTable"
+              (ngModelChange)="worksChangedReload()"
               list="works-db-tables"
               placeholder="dbo.ExternalIdentityMappings"
-              class="vs-input h-6 min-w-56 text-xs"
+              class="vs-input h-6 min-w-56"
             />
-            <span>ADD（新增列）</span>
-          </label>
+            <span class="ml-2">別名</span>
+            <input
+              [(ngModel)]="w.intoAlias"
+              (ngModelChange)="worksChangedReload()"
+              placeholder="（合併時引用）"
+              title="目標別名；合併模式的比對鍵 ON 以此引用目標欄位"
+              class="vs-input h-6 w-28"
+            />
+          </div>
 
-          <table class="vs-table">
-            <thead>
-              <tr>
-                <th>目標欄位</th>
-                <th>值來源</th>
-                <th>值</th>
-                <th class="w-8"></th>
-              </tr>
-            </thead>
-            <tbody>
-              @for (a of w.assigns; track $index; let i = $index) {
-                <tr>
-                  <td>
-                    <input [(ngModel)]="a.targetColumn" list="works-target-columns" class="vs-input h-6 w-44 text-xs" />
-                  </td>
-                  <td>
-                    <select
-                      [ngModel]="a.kind"
-                      (ngModelChange)="onAssignKindChange(a, $event)"
-                      class="vs-input h-6 text-xs"
-                    >
-                      <option value="source">來源欄位</option>
-                      <option value="lookup" [disabled]="!w.useCondition">比對表欄位</option>
-                      <option value="literal">常值</option>
-                      <option value="gen">生成</option>
-                      <option value="concat">合成欄位</option>
+          <!-- 寫入模式 -->
+          <div class="flex items-center gap-4 text-xs">
+            <span class="text-vs-muted">寫入模式</span>
+            <label class="flex items-center gap-1">
+              <input type="radio" [name]="'wm-' + selected()" [checked]="w.writeMode === 'add'" (change)="onWriteModeChange(w, 'add')" class="accent-vs-accent" />
+              直接新增 ADD
+            </label>
+            <label class="flex items-center gap-1">
+              <input type="radio" [name]="'wm-' + selected()" [checked]="w.writeMode === 'merge'" (change)="onWriteModeChange(w, 'merge')" class="accent-vs-accent" />
+              合併 / Upsert（依比對鍵）
+            </label>
+          </div>
+
+          @if (w.writeMode === "merge") {
+            <div class="flex flex-col gap-1 rounded border border-vs-border p-2">
+              <span class="text-[11px] text-vs-text">比對鍵（ON）：{{ w.intoAlias || "mapping" }} ↔ 來源/查表</span>
+              @for (r of w.mergeOn; track $index; let mi = $index) {
+                <div class="flex flex-wrap items-center gap-1 text-xs">
+                  <span class="text-vs-muted">{{ w.intoAlias || "mapping" }}.</span>
+                  <input [(ngModel)]="r.targetColumn" (ngModelChange)="worksChanged()" [attr.list]="aliasListId(w.intoAlias)" placeholder="目標欄位" class="vs-input h-6 w-32" />
+                  <select [(ngModel)]="r.op" (ngModelChange)="worksChanged()" class="vs-input h-6">
+                    <option value="==">==</option>
+                    <option value="!=">!=</option>
+                  </select>
+                  <select [(ngModel)]="r.rhsKind" (ngModelChange)="worksChanged()" class="vs-input h-6">
+                    <option value="field">欄位</option>
+                    <option value="literal">常值</option>
+                  </select>
+                  @if (r.rhsKind === "field") {
+                    <select [(ngModel)]="r.rhsAlias" (ngModelChange)="worksChanged()" class="vs-input h-6 w-20">
+                      @for (al of sourceAliases(w); track al) {
+                        <option [value]="al">{{ al }}</option>
+                      }
                     </select>
-                  </td>
-                  <td>
-                    @if (a.kind === "gen") {
-                      <select [(ngModel)]="a.value" class="vs-input h-6 w-56 text-xs">
-                        @for (g of generators; track g.value) {
-                          <option [value]="g.value">{{ g.label }}</option>
-                        }
-                      </select>
-                    } @else if (a.kind === "concat") {
-                      <textarea
-                        [(ngModel)]="a.value"
-                        rows="1"
-                        placeholder="N'前綴: {[SOURCE].[欄位]} 尾碼'（{…} 內放來源/比對表欄位或 Gen）"
-                        spellcheck="false"
-                        class="vs-input vs-concat w-full min-w-72 font-mono text-xs"
-                        title="字串模板：固定文字直接寫，動態值放在 {…} 內（如 {[SOURCE].[displayName]}、{Gen.ULID}）；需要字面大括號時請重複輸入跳脫，NULL 視為空字串。點擊可展開多行編輯。"
-                      ></textarea>
-                    } @else {
-                      <input
-                        [(ngModel)]="a.value"
-                        [attr.list]="
-                          a.kind === 'source'
-                            ? 'works-src-columns'
-                            : a.kind === 'lookup'
-                              ? 'works-lookup-columns'
-                              : null
-                        "
-                        [placeholder]="a.kind === 'literal' ? '常值（如 123、TRUE、NULL 或文字）' : '欄位名稱'"
-                        class="vs-input h-6 w-56 text-xs"
-                      />
-                    }
-                  </td>
-                  <td>
-                    <button
-                      type="button"
-                      (click)="removeAssign(w, i)"
-                      title="刪除"
-                      class="text-vs-muted hover:text-vs-error"
-                    >
-                      ✕
-                    </button>
-                  </td>
-                </tr>
-              } @empty {
-                <tr>
-                  <td colspan="4" class="text-[11px] text-vs-muted">尚無欄位指派，按「＋ 新增欄位」或「自動對應」。</td>
-                </tr>
+                    <span>.</span>
+                    <input [(ngModel)]="r.rhsColumn" (ngModelChange)="worksChanged()" [attr.list]="aliasListId(r.rhsAlias)" placeholder="欄位" class="vs-input h-6 w-28" />
+                  } @else {
+                    <input [(ngModel)]="r.rhsLiteral" (ngModelChange)="worksChanged()" placeholder="常值（如 N'LDAP'）" class="vs-input h-6 w-28" />
+                  }
+                  <button type="button" (click)="removeMergeOn(w, mi)" class="text-vs-muted hover:text-vs-error">✕</button>
+                </div>
               }
-            </tbody>
-          </table>
+              <button type="button" (click)="addMergeOn(w)" class="vs-btn-secondary h-5 self-start px-1.5 text-xs">＋ 新增比對鍵</button>
+              <div class="mt-1 flex flex-wrap items-center gap-3">
+                <label class="flex items-center gap-1 text-[11px] text-vs-muted">
+                  未命中（NOT MATCHED）
+                  <select [(ngModel)]="w.notMatchedAction" (ngModelChange)="worksChanged()" class="vs-input h-6 text-xs">
+                    <option value="add">新增 ADD</option>
+                    <option value="skip">略過 SKIP</option>
+                  </select>
+                </label>
+                <label class="flex items-center gap-1 text-[11px] text-vs-muted">
+                  命中（MATCHED）
+                  <select [ngModel]="w.matchedAction" (ngModelChange)="onMatchedActionChange(w, $event)" class="vs-input h-6 text-xs">
+                    <option value="skip">略過 SKIP</option>
+                    <option value="update">更新 UPDATE</option>
+                    <option value="delete">刪除 DELETE</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+          }
+
+          <!-- 欄位對應表（ADD / UPDATE 共用），以 ng-template 重用 -->
+          <ng-template #assignTable let-list>
+            <table class="vs-table">
+              <thead>
+                <tr>
+                  <th>目標欄位</th>
+                  <th>值來源</th>
+                  <th>值</th>
+                  <th class="w-8"></th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (a of list; track $index; let i = $index) {
+                  <tr>
+                    <td>
+                      <input [(ngModel)]="a.targetColumn" (ngModelChange)="worksChanged()" list="works-target-columns" class="vs-input h-6 w-40 text-xs" />
+                    </td>
+                    <td>
+                      <select [ngModel]="a.kind" (ngModelChange)="onAssignKindChange(w, a, $event)" class="vs-input h-6 text-xs">
+                        <option value="gen">產生器</option>
+                        <option value="field">欄位</option>
+                        <option value="literal">常值</option>
+                        <option value="concat">合成欄位</option>
+                      </select>
+                    </td>
+                    <td>
+                      @if (a.kind === "gen") {
+                        <select [(ngModel)]="a.value" (ngModelChange)="worksChanged()" class="vs-input h-6 w-56 text-xs">
+                          @for (g of generators; track g.value) {
+                            <option [value]="g.value">{{ g.label }}</option>
+                          }
+                        </select>
+                      } @else if (a.kind === "field") {
+                        <div class="flex items-center gap-1">
+                          <select [(ngModel)]="a.alias" (ngModelChange)="worksChanged()" class="vs-input h-6 w-24 text-xs">
+                            @for (al of sourceAliases(w); track al) {
+                              <option [value]="al">{{ al }}</option>
+                            }
+                          </select>
+                          <span>.</span>
+                          <input [(ngModel)]="a.column" (ngModelChange)="worksChanged()" [attr.list]="aliasListId(a.alias)" placeholder="欄位" class="vs-input h-6 w-32 text-xs" />
+                        </div>
+                      } @else if (a.kind === "concat") {
+                        <textarea
+                          [(ngModel)]="a.value"
+                          (ngModelChange)="worksChanged()"
+                          rows="1"
+                          placeholder="N'前綴: {account.[欄位]} 尾碼'（{…} 內放別名.欄位或 Gen）"
+                          spellcheck="false"
+                          class="vs-input vs-concat w-full min-w-72 font-mono text-xs"
+                          title="字串模板：固定文字直接寫，動態值放在 {…} 內（如 {account.[DisplayName]}、{Gen.ULID}）；需要字面大括號時請重複輸入跳脫，NULL 視為空字串。"
+                        ></textarea>
+                      } @else {
+                        <input
+                          [(ngModel)]="a.value"
+                          (ngModelChange)="worksChanged()"
+                          placeholder="常值（如 123、TRUE、NULL 或文字）"
+                          class="vs-input h-6 w-56 text-xs"
+                        />
+                      }
+                    </td>
+                    <td>
+                      <button type="button" (click)="removeRow(list, i)" title="刪除" class="text-vs-muted hover:text-vs-error">✕</button>
+                    </td>
+                  </tr>
+                } @empty {
+                  <tr>
+                    <td colspan="4" class="text-[11px] text-vs-muted">尚無欄位指派，按「＋ 新增欄位」或「自動對應」。</td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          </ng-template>
+
+          <!-- ADD（直接新增，或 merge 的 NOT MATCHED → ADD） -->
+          @if (w.writeMode === "add" || (w.writeMode === "merge" && w.notMatchedAction === "add")) {
+            <div class="flex items-center gap-2">
+              <span class="text-[11px] tracking-widest text-vs-muted uppercase">
+                {{ w.writeMode === "merge" ? "NOT MATCHED → 新增欄位（ADD）" : "新增欄位（ADD）" }}
+              </span>
+              <button type="button" (click)="addRow(w, w.assigns)" class="ml-auto vs-btn-secondary h-6">＋ 新增欄位</button>
+            </div>
+            <ng-container *ngTemplateOutlet="assignTable; context: { $implicit: w.assigns }"></ng-container>
+          }
+
+          <!-- MATCHED → UPDATE 的 SET 欄位 -->
+          @if (w.writeMode === "merge" && w.matchedAction === "update") {
+            <div class="mt-2 flex items-center gap-2">
+              <span class="text-[11px] tracking-widest text-vs-muted uppercase">MATCHED → 更新欄位（UPDATE）</span>
+              <button type="button" (click)="addRow(w, w.matchedAssigns)" class="ml-auto vs-btn-secondary h-6">＋ 新增欄位</button>
+            </div>
+            <ng-container *ngTemplateOutlet="assignTable; context: { $implicit: w.matchedAssigns }"></ng-container>
+          }
         </section>
+
+        <!-- 別名欄位建議 datalist（依目前作業的別名動態產生） -->
+        @for (alias of datalistAliases(w); track alias) {
+          <datalist [id]="aliasListId(alias)">
+            @for (name of columnsForAlias(alias); track name) {
+              <option [value]="name"></option>
+            }
+          </datalist>
+        }
       } @else {
         <div class="flex flex-1 items-center justify-center">
           <p class="text-sm text-vs-muted">選擇左側工作項目，或按「＋ 新增」建立第一個遷移作業。</p>
@@ -245,11 +415,6 @@
     </div>
 
     <!-- 共用 datalist（視覺模式輸入建議） -->
-    <datalist id="works-src-columns">
-      @for (name of sourceColumnNames(); track name) {
-        <option [value]="name"></option>
-      }
-    </datalist>
     <datalist id="works-db-tables">
       @for (t of tables(); track tableKey(t)) {
         <option [value]="tableKey(t)"></option>
@@ -257,11 +422,6 @@
     </datalist>
     <datalist id="works-target-columns">
       @for (c of targetColumns(); track c.name) {
-        <option [value]="c.name">{{ c.dbType }}</option>
-      }
-    </datalist>
-    <datalist id="works-lookup-columns">
-      @for (c of lookupColumns(); track c.name) {
         <option [value]="c.name">{{ c.dbType }}</option>
       }
     </datalist>
